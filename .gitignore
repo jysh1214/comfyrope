@@ -1,0 +1,18 @@
+# Made by the scripts here (see README.md), and far too big for git
+# setup_venv.sh: the tool venv
+/.venv/
+# install_comfyui.py: a git clone of ComfyUI with its own venv
+/ComfyUI/
+# download_models.py: about 54 GB of model files, plus *.part while downloading
+/models/
+# img2img.py: one folder per result, with the PNG and repro.sh
+/outputs/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# logs, e.g. nohup uv run download_models.py all > dl.log
+*.log
+# install_comfyui.py --rewrite-config keeps the file it replaces as *.bak
+*.bak
