@@ -15,7 +15,7 @@ modified). Runs Qwen-Image-Edit-2511 or Qwen-Image-2.1 through ComfyUI's API.
     ./img2img.py photo.jpg "把背景換成黃昏的海邊"
     ./img2img.py person.png shirt.png "讓圖1的人穿上圖2的襯衫" -n 4
     ./img2img.py photo.jpg "turn this into a watercolor painting" -m 2.1
-    ./img2img.py photo.jpg "..." --lora my_style.safetensors:0.8 -s 42 -o result.png
+    ./img2img.py photo.jpg "..." --lora my_style.safetensors:0.8 -s 42 -o results
 
 Give the input images first (2511: up to 3, 2.1: up to 10), then the prompt. The first image sets the
 output size. With several images, refer to them in the prompt as 圖1 / 圖2 (or image 1 / image 2).
@@ -28,11 +28,11 @@ The script talks to the ComfyUI at --server (default http://127.0.0.1:8188). If 
 one with run_comfyui.sh for this command and stops it afterwards; --keep-server leaves it running so the
 next command skips the model load.
 
-Each result gets a folder of its own in ./outputs, named <time>_<first image>_<model>_s<seed>, for example
-20261013-225301_photo_2511_s42; the folders of one -n run share the time. A folder holds the PNG, named like
-the folder, and repro.sh, which makes that image again: this command with the image's seed and every
-setting spelled out. The PNG also embeds the API workflow ComfyUI ran; drop it on the ComfyUI page to see
-that workflow as a node graph.
+Each result gets a folder of its own in ./outputs, or in the folder -o names, named
+<time>_<first image>_<model>_s<seed>, for example 20261013-225301_photo_2511_s42; the folders of one -n run
+share the time. A folder holds the PNG, named like the folder, and repro.sh, which makes that image again:
+this command with the image's seed and every setting spelled out. The PNG also embeds the API workflow
+ComfyUI ran; drop it on the ComfyUI page to see that workflow as a node graph.
 """
 from __future__ import annotations
 
@@ -491,10 +491,8 @@ def run_name(a: argparse.Namespace, seed: int) -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S', a.when)}_{stem}_{a.model}_s{seed}"
 
 
-def output_path(a: argparse.Namespace, seed: int, index: int) -> Path:
-    """The -o file as given, or else <name>.png in a new folder <name>, which this creates."""
-    if not a.folders:  # an explicit file name is overwritten
-        return a.out if a.count == 1 else a.out.with_name(f"{a.out.stem}_{index}{a.out.suffix}")
+def output_path(a: argparse.Namespace, seed: int) -> Path:
+    """<name>.png in a new folder <name>, which this creates in the -o folder."""
     name, n = run_name(a, seed), 2
     folder = (a.out if a.out is not None else OUTPUTS) / name
     while True:
@@ -584,13 +582,11 @@ def collect(comfy: Comfy, pid: str, job: Job, entry: dict | None, a: argparse.Na
     took = f", {time.monotonic() - job.started:.1f}s" if job.started else ""
     for ref in refs:
         data = comfy.fetch(ref)
-        path = output_path(a, job.seed, job.index)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = output_path(a, job.seed)
         path.write_bytes(data)
-        if a.folders:
-            repro = path.parent / "repro.sh"
-            repro.write_text(repro_script(a, job, path, enhanced), encoding="utf-8")
-            repro.chmod(0o755)
+        repro = path.parent / "repro.sh"
+        repro.write_text(repro_script(a, job, path, enhanced), encoding="utf-8")
+        repro.chmod(0o755)
         size = png_size(data)
         status.line(f"  -> {tilde(path)}" + (f"  {size[0]}x{size[1]}" if size else "") + took)
         job.saved.append(path)
@@ -701,9 +697,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("prompt", help="the edit to make, in Chinese or English")
     p.add_argument("-m", "--model", choices=["2511", "2.1"], default="2511",
                    help="Qwen-Image-Edit-2511 (default) or Qwen-Image-2.1")
-    p.add_argument("-o", "--out", type=Path,
-                   help="where the result folders go (default: ./outputs next to this script); a .png file name "
-                        "instead writes just that file, with no folder or repro.sh")
+    p.add_argument("-o", "--out", type=Path, metavar="DIR",
+                   help="folder the result folders go in, created if missing (default: ./outputs next to this script)")
     p.add_argument("-n", "--count", type=int, default=1, help="number of variations, one seed each (default 1)")
     p.add_argument("-s", "--seed", type=int, help="seed of the first variation (default: random, and printed)")
     p.add_argument("--negative", default="", help="negative prompt; only has an effect when cfg is above 1")
@@ -736,8 +731,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error(f"model {a.model} takes at most {MAX_IMAGES[a.model]} images")
     if a.count < 1:
         p.error("--count must be at least 1")
-    if a.out is not None and a.out.suffix and a.out.suffix.lower() != ".png":
-        p.error("-o takes a .png file name or a folder")
+    if a.out is not None and a.out.exists() and not a.out.is_dir():
+        p.error(f"-o takes a folder, and {a.out} is a file")
     if a.model == "2511":
         if a.resolution is not None or a.enhance:
             p.error("--resolution and --enhance belong to Qwen-Image-2.1 (-m 2.1)")
@@ -754,7 +749,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         a.steps = a.steps or 25
         a.cfg = a.cfg if a.cfg is not None else 1.0
     a.stem = a.images[0].stem
-    a.folders = a.out is None or not a.out.suffix  # one new folder per result, with the PNG and repro.sh
     a.comfy_args = shlex.split(a.comfy_args)
     return a
 

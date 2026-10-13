@@ -202,7 +202,7 @@ MODEL 可寫 `2.1`、`2511`、`all`（別名 `qwen-image-2.1`、`qwen-image-edit
 ./img2img.py photo.jpg "..." --lightning off                          # 不用 Lightning，跑完整模型：40 步、CFG 4，慢很多
 ./img2img.py photo.jpg "..." --lightning off --steps 20               # 完整模型只跑 20 步，是 ComfyUI template 的參考值
 ./img2img.py photo.jpg "turn this into a watercolor painting" -m 2.1
-./img2img.py photo.jpg "..." --lora my_style.safetensors:0.8 -s 42 -o result.png
+./img2img.py photo.jpg "..." --lora my_style.safetensors:0.8 -s 42 -o results
 ./img2img.py photo.jpg "..." --dry-run                                # 只印出 API workflow JSON
 ```
 
@@ -221,7 +221,7 @@ prompt 用中文或英文都可以，寫成指令句效果最好，例如「把�
 
 ### 輸出與重現
 
-每張結果各有一個資料夾，預設放在 `outputs/`，`-o DIR` 可以改位置：
+每張結果各有一個資料夾，預設放在 `outputs/`，`-o DIR` 可以改放到別的資料夾（不存在會自動建立）：
 
 ```
 outputs/
@@ -251,8 +251,6 @@ outputs/20261013-225301_photo_2511_s3418827001/repro.sh --dry-run  # 加在後�
 outputs/20261013-225301_photo_2511_s3418827001/repro.sh -s 7       # 其他設定不變，改用 seed 7
 ```
 
-`-o result.png` 這類指定 `.png` 檔名的用法照舊只寫那個檔，不建資料夾，也沒有 `repro.sh`。
-
 ### 支援的圖片格式
 
 | 輸入 | 處理方式 |
@@ -280,7 +278,7 @@ outputs/20261013-225301_photo_2511_s3418827001/repro.sh -s 7       # 其他設�
 | 參數 | 說明 |
 |---|---|
 | `-m 2511\|2.1` | 選模型，預設 2511 |
-| `-o PATH` | 結果資料夾要放在哪裡，預設 `./outputs`；給 `.png` 檔名則只寫那個檔 |
+| `-o DIR` | 結果資料夾要放在哪個資料夾，預設 `./outputs`，不存在會自動建立 |
 | `-n N` | 出 N 張，seed 依序加 1，每張一個資料夾 |
 | `-s SEED` | 第一張的 seed；不給就隨機。每張的 seed 都寫在資料夾名稱和 `repro.sh` 裡 |
 | `--negative TEXT` | negative prompt，只有 CFG 大於 1 時才有作用 |
