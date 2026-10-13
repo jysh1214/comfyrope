@@ -1,7 +1,9 @@
-# i2i：Qwen-Image 本地 Image-to-Image 環境
+# img2img：Qwen-Image 本地 Image-to-Image 環境
 
 在這台機器（RTX 4090 24 GB）用 ComfyUI 跑 Qwen-Image-Edit-2511 與 Qwen-Image-2.1。
 五個 script：`setup_venv.sh` 建立工具用的 venv，`install_comfyui.py` 安裝或更新 ComfyUI，`download_models.py` 抓模型，`run_comfyui.sh` 啟動 ComfyUI，`img2img.py` 用圖片加 prompt 產生新圖。
+
+以下的指令都在 repo 的根目錄執行。script 依自己所在的位置找 `ComfyUI/`、`models/`、`.venv/` 和 `outputs/`，所以 repo 放在哪裡都可以，整個資料夾搬家後也不用重裝。
 
 ## 目錄結構
 
@@ -36,8 +38,7 @@
 | 用專案的 venv | `source .venv/bin/activate` 之後 `python img2img.py …` | 先跑一次 `./setup_venv.sh` |
 
 ```bash
-cd ~/i2i
-./setup_venv.sh                 # 建立 ~/i2i/.venv 並裝好套件，重跑只會補缺的
+./setup_venv.sh                 # 建立 .venv 並裝好套件，重跑只會補缺的
 source .venv/bin/activate
 python img2img.py photo.jpg "把天空換成星空"
 ```
@@ -53,7 +54,6 @@ ComfyUI 自己的 venv 在 `ComfyUI/.venv`，由 `install_comfyui.py` 管理，�
 只用 Python 標準函式庫，需要 `git` 和 `uv`。每一步都先檢查現況，已經就緒就跳過，所以重跑是安全的：
 
 ```bash
-cd ~/i2i
 ./install_comfyui.py --dry-run       # 只印計畫和指令，什麼都不改
 ./install_comfyui.py                 # 全新安裝；已裝過就重新檢查一遍
 ./install_comfyui.py --ref latest    # 把 ComfyUI 升到最新 release
@@ -69,7 +69,7 @@ cd ~/i2i
 | comfyui | 從 Comfy-Org/ComfyUI clone 指定的 tag；已有 clone 時，只有給了 `--ref` 才切版本 |
 | venv | 用 uv 在 `ComfyUI/.venv` 建 Python 3.12 venv |
 | packages | `uv pip install --torch-backend cu130 -r requirements.txt pip`：torch 從 PyTorch 的 cu130 index 抓，其餘從 PyPI |
-| config | 寫 `ComfyUI/extra_model_paths.yaml`，指向 `~/i2i/models` |
+| config | 寫 `ComfyUI/extra_model_paths.yaml`，用相對路徑 `../models/` 指向 `models/`，搬動整個 repo 也不必改 |
 | launcher | 寫 `run_comfyui.sh` |
 | self-test | 用 `CUDA_VISIBLE_DEVICES=` 把 GPU 藏起來，跑 `main.py --cpu --quick-test-for-ci`，確認能啟動、四個模型目錄都有載入。temp 和 user 資料夾用用完即丟的暫存目錄，所以 ComfyUI 正在跑時也能放心重跑 |
 
@@ -106,7 +106,6 @@ cd ~/i2i
 直接執行，第一次會自動建一個只含 huggingface_hub 的環境（PEP 723 inline metadata）：
 
 ```bash
-cd ~/i2i
 uv run download_models.py --list                    # 列出所有已知檔案與大小
 uv run download_models.py all --dry-run             # 只印計畫（含實際大小、剩餘空間），不寫檔
 uv run download_models.py all                       # 下載 2.1 + 2511 的預設組合
@@ -139,7 +138,7 @@ MODEL 可寫 `2.1`、`2511`、`all`（別名 `qwen-image-2.1`、`qwen-image-edit
 | `--dry-run` | 只印計畫 |
 | `--list` | 列出所有已知檔案 |
 | `--force` | 略過剩餘磁碟空間檢查 |
-| `--ipv6` | 允許 IPv6。預設只走 IPv4，原因見「故障排除」 |
+| `--ipv6` | 允許 IPv6。預設只走 IPv4：huggingface.co 有 IPv6 位址，若本機的 IPv6 有設定卻不通，每個 request 都要先等 IPv6 連線逾時才改走 IPv4 |
 | `--token` | HF token，公開 repo 不需要；預設讀 `$HF_TOKEN` |
 | `--q21-precision int8\|bf16` | 2.1 的 DiT 與 Qwen3-VL encoder 精度。bf16 是 14.2 + 17.5 GB |
 | `--q21-variant base\|turbo` | 2.1 用 base（template 預設）或蒸餾過的 turbo 模型 |
@@ -164,19 +163,19 @@ MODEL 可寫 `2.1`、`2511`、`all`（別名 `qwen-image-2.1`、`qwen-image-edit
 ## 啟動 ComfyUI：run_comfyui.sh
 
 ```bash
-~/i2i/run_comfyui.sh                    # http://127.0.0.1:8188
-~/i2i/run_comfyui.sh --reserve-vram 2   # 桌面卡頓時多留 2 GB VRAM 給 niri
-~/i2i/run_comfyui.sh --listen           # 讓區網其他機器也能連
+./run_comfyui.sh                    # http://127.0.0.1:8188
+./run_comfyui.sh --reserve-vram 2   # 桌面卡頓時多留 2 GB VRAM 給 niri
+./run_comfyui.sh --listen           # 讓區網其他機器也能連
 ```
 
-這個檔由 `install_comfyui.py` 生成，只做兩件事：`cd` 進 `ComfyUI/`，再用 `.venv/bin/python main.py` 啟動。裝了 Manager 時會多帶 `--enable-manager`。其他參數原樣轉給 `main.py`，完整清單看 `~/i2i/run_comfyui.sh --help`。
+這個檔由 `install_comfyui.py` 生成，只做兩件事：`cd` 進 `ComfyUI/`，再用 `.venv/bin/python main.py` 啟動。裝了 Manager 時會多帶 `--enable-manager`。其他參數原樣轉給 `main.py`，完整清單看 `./run_comfyui.sh --help`。
 
 ### 注意事項
 
 - **GPU 和桌面共用。** 載入模型那幾十秒畫面可能頓一下；若整個桌面黑掉，先試 `--reserve-vram 2`。
 - **VRAM 不用特別調。** ComfyUI 0.39 預設開 dynamic VRAM（comfy-aimdo），2511 的 20.5 GB 模型加 9.4 GB text encoder 會自動 offload 到 RAM，不要加 `--lowvram`。
 - **第一次跑 workflow 會從 NVMe 讀約 30 GB 進 RAM**，等一兩分鐘是正常的；之後同一個 workflow 換 prompt 不用重載。
-- 模型目錄來自 `ComfyUI/extra_model_paths.yaml`，裡面 `is_default: true` 讓 `~/i2i/models` 排在最前面，也是前端下載模型時的預設落點。
+- 模型目錄來自 `ComfyUI/extra_model_paths.yaml`，裡面 `is_default: true` 讓 repo 的 `models/` 排在最前面，也是前端下載模型時的預設落點。
 
 ### 要用的 template
 
@@ -197,7 +196,6 @@ MODEL 可寫 `2.1`、`2511`、`all`（別名 `qwen-image-2.1`、`qwen-image-edit
 給圖片和 prompt 就出圖，不必開 UI。背後是把 ComfyUI 內建的 template 攤平成 API workflow，再經由 HTTP API 交給 ComfyUI 執行：
 
 ```bash
-cd ~/i2i
 ./img2img.py photo.jpg "把背景換成黃昏的海邊"
 ./img2img.py person.png shirt.png "讓圖1的人穿上圖2的襯衫" -n 4     # 4 個 seed 各出一張
 ./img2img.py photo.jpg "..." --lightning 8                            # 改用 8-step LoRA，自動跑 8 步；要先下載，見下方參數表
@@ -245,7 +243,7 @@ outputs/
 `repro.sh` 只重做這一張。它是這次的指令再做三項調整：seed 換成這張自己的；影響畫面的設定全部寫明，連沒給、走預設值的 `--steps`、`--cfg`、`--lightning` 也寫進去；路徑一律改成絕對路徑。
 所以之後就算改了 script 的預設值，重跑的結果也不會變。跟畫面無關的參數（`-o`、`--server`、`--comfy-args`、`--keep-server` 等）有給才會帶上，`-n` 不帶。
 開頭的註解記下出圖時間，以及 ComfyUI 版本與啟動參數、torch 版本、GPU；用了 `--enhance` 的話，也會記下 enhancer 改寫後的 prompt。
-它直接呼叫 `~/i2i/.venv/bin/python3`，不必先 activate。
+它用絕對路徑呼叫 repo 裡的 `.venv/bin/python3`，不必先 activate；也因為是絕對路徑，repo 搬家後，搬家前產生的 `repro.sh` 要把路徑改成新位置才能跑。
 
 ```bash
 outputs/20261013-225301_photo_2511_s3418827001/repro.sh            # 再出一次，結果放進新的資料夾

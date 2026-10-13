@@ -244,16 +244,18 @@ def same_python(have: str | None, want: str) -> bool:
 
 # ---------------------------------------------------------------- generated files
 
-def yaml_text(models: Path) -> str:
-    base = f"{models}/"
+def yaml_text(d: Path, models: Path) -> str:
+    if d == HERE / "ComfyUI" and models == HERE / "models":
+        # ComfyUI resolves a relative base_path from this file's folder, so the whole tree can move
+        base, origin = "../models/", "Models downloaded by ../download_models.py live outside the ComfyUI tree."
+    else:
+        base, origin = f"{models}/", f"Models live in {models}, outside the ComfyUI tree."
     if re.search(r"[\s:#'\"{}\[\],&*!|>%@`]", base):
         base = json.dumps(base)
-    origin = (f"Models downloaded by {tilde(HERE / 'download_models.py')} live outside the ComfyUI tree."
-              if models == HERE / "models" else f"Models live in {models}, outside the ComfyUI tree.")
     return (
         f"# {origin}\n"
         "# is_default makes these folders the first listed and the default download target.\n"
-        "i2i:\n"
+        "img2img:\n"
         f"    base_path: {base}\n"
         "    is_default: true\n"
         + "".join(f"    {k}: {k}/\n" for k in MODEL_KINDS)
@@ -575,7 +577,7 @@ def main(argv: list[str]) -> int:
     models = None
     if not a.no_model_paths:
         models = a.models
-        write_file(a.dir / "extra_model_paths.yaml", yaml_text(models), "config", a.rewrite_config)
+        write_file(a.dir / "extra_model_paths.yaml", yaml_text(a.dir, models), "config", a.rewrite_config)
         if not models.exists():
             note(f"{tilde(models)} does not exist yet; download_models.py creates it")
     launcher = HERE / "run_comfyui.sh"

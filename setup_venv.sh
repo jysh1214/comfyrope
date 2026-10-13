@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Create ~/i2i/.venv with every package img2img.py and download_models.py need, so they also run as
-#   source ~/i2i/.venv/bin/activate && python img2img.py ...
+# Create .venv next to this script with every package img2img.py and download_models.py need, so they also run as
+#   source .venv/bin/activate && python img2img.py ...
 # The package lists live in each script's "# /// script" header; uv reads them from there, so this stays in sync.
-# Re-run after a script gains a package. To rebuild from scratch: rm -rf ~/i2i/.venv, then run this again.
+# Re-run after a script gains a package. To rebuild from scratch: rm -rf .venv, then run this again.
 # ComfyUI has its own venv (ComfyUI/.venv), managed by install_comfyui.py.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
