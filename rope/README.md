@@ -95,7 +95,7 @@ An image's id is the SHA-256 of its file:
 | `rope mkdir [-p] trips/京都` | Make a folder (in rope only) |
 | `rope mv trips/京都 travel/京都` | Rename or move a folder |
 | `rope mv @3fa9c1 @9b2e0f portraits` | Move images into a folder; `/` is unfiled |
-| `rope rmdir F` | Remove an empty folder |
+| `rope rmdir [-r] F` | Remove an empty folder; with `-r`, a folder with everything in it: its subfolders go, and its images move to the trash (restored, they come back unfiled) |
 | `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image in a folder recursively, all into F; `--tag` repeats |
 | `rope import --tree DIR... [--into F]` | Make each disk folder a rope folder of the same name, with its subfolders, in F or at the top |
 | `rope ls [F] [-r] [-l] [--tag T] [--trash]` | List a folder; without F, the unfiled images |
@@ -126,7 +126,7 @@ The window runs on its own: the command returns at once, and closing the termina
 **Left:**
 
 - All, Unfiled, and rope's own folder tree, with image counts.
-- Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it or delete it; `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
+- Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it, or delete it with everything in it (its images move to the trash; it says how many first); `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
 - Below the tree: the tags, then the trash. Right-click the trash and choose Clean to empty it; it asks first, since that deletes for good.
 
 **Middle:**

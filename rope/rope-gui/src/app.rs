@@ -617,6 +617,19 @@ impl App {
         rope_core::catalog::shell_word(&self.model().catalog.folder_path(id))
     }
 
+    /// Deletes a folder with everything in it: its subfolders go, its images go to the trash.
+    fn delete_folder(&mut self, id: &str) -> anyhow::Result<()> {
+        let path = self.model().catalog.folder_path(id);
+        let gone = self.model().catalog.subtree(id);
+        let (folders, trashed) = store::remove_folder_tree(&self.lib, &path)?;
+        if matches!(&self.view, View::Folder(f) if gone.contains(f)) {
+            self.view = View::All;
+        }
+        self.refresh();
+        self.say(format!("deleted {folders} folder(s); moved {} image(s) to the trash", trashed.len()), false);
+        Ok(())
+    }
+
     /// Every image in the trash.
     fn trashed(&self) -> Vec<String> {
         let model = self.model();
@@ -1175,7 +1188,8 @@ impl App {
                     ui.text_edit_singleline(name).request_focus();
                     let old = model.catalog.folder_path(id);
                     let parent = old.rsplit_once('/').map(|(p, _)| p.to_owned()).unwrap_or_default();
-                    let new = if parent.is_empty() { name.trim().to_owned() } else { format!("{parent}/{}", name.trim()) };
+                    let new =
+                        if parent.is_empty() { name.trim().to_owned() } else { format!("{parent}/{}", name.trim()) };
                     if buttons(ui, "Rename", enter && !name.trim().is_empty(), &mut done) {
                         run = Some(Box::new(move |app| {
                             store::edit_catalog(&app.lib, "mv", &[], |c| c.move_folder(&old, &new))?;
@@ -1186,18 +1200,22 @@ impl App {
                 }
                 Dialog::DeleteFolder { id } => {
                     let path = model.catalog.folder_path(id);
+                    let (folders, images) = model.catalog.tree_size(id);
                     ui.heading("Delete folder");
-                    ui.label(format!("Delete the folder {path}? Only an empty folder can be deleted; its images stay in rope either way."));
+                    let below = match folders - 1 {
+                        0 => String::new(),
+                        n => format!(" and the {n} folder(s) inside it"),
+                    };
+                    ui.label(format!("Delete the folder {path}{below}?"));
+                    if images > 0 {
+                        ui.label(format!(
+                            "Its {images} image(s) move to the trash. Restored from there, they come back unfiled; \
+                             emptying the trash deletes them for good."
+                        ));
+                    }
                     if buttons(ui, "Delete", enter, &mut done) {
                         let id = id.clone();
-                        run = Some(Box::new(move |app| {
-                            store::edit_catalog(&app.lib, "rmdir", &[], |c| c.rmdir(&path))?;
-                            if app.view == View::Folder(id) {
-                                app.view = View::All;
-                            }
-                            app.refresh();
-                            Ok(())
-                        }));
+                        run = Some(Box::new(move |app| app.delete_folder(&id)));
                     }
                 }
                 Dialog::Tag { ids, name } => {
@@ -1205,19 +1223,22 @@ impl App {
                     ui.text_edit_singleline(name).request_focus();
                     if buttons(ui, "Add", enter && !name.trim().is_empty(), &mut done) {
                         let (ids, tag) = (ids.clone(), name.clone());
-                        run = Some(Box::new(move |app| {
-                            app.try_apply(Action::AddTag(ids, tag), None)
-                        }));
+                        run = Some(Box::new(move |app| app.try_apply(Action::AddTag(ids, tag), None)));
                     }
                 }
                 Dialog::Purge { ids } => {
                     let gone: std::collections::HashSet<&String> = ids.iter().collect();
                     let kept = ids.iter().filter(|i| model.children(i).iter().any(|c| !gone.contains(c))).count();
                     ui.heading("Delete for good");
-                    ui.label(format!("Delete {} image(s) for good: the files, their notes and their records.", ids.len()));
+                    ui.label(format!(
+                        "Delete {} image(s) for good: the files, their notes and their records.",
+                        ids.len()
+                    ));
                     if kept > 0 {
-                        ui.label(format!("{kept} of them were used to make other images. Their bytes stay, so those can still be \
-                                          replayed, until the images made from them are deleted too."));
+                        ui.label(format!(
+                            "{kept} of them were used to make other images. Their bytes stay, so those can still be \
+                                          replayed, until the images made from them are deleted too."
+                        ));
                     }
                     if buttons(ui, "Delete for good", false, &mut done) {
                         let ids = ids.clone();
@@ -1227,7 +1248,11 @@ impl App {
                             let lib = app.lib.clone();
                             std::thread::spawn(move || {
                                 let r = purge::purge(&lib, &ids, false).map_err(|e| format!("{e:#}")).map(|p| {
-                                    format!("deleted {} image(s); kept the bytes of {} for their descendants", p.deleted.len(), p.kept.len())
+                                    format!(
+                                        "deleted {} image(s); kept the bytes of {} for their descendants",
+                                        p.deleted.len(),
+                                        p.kept.len()
+                                    )
                                 });
                                 let _ = tx.send(r);
                             });
@@ -1699,6 +1724,29 @@ mod tests {
         assert_eq!(c.find("trips/京都"), Some(Some(folder.clone())), "an existing folder is reused");
         assert!(app.new_folder("旅行/2026").unwrap_err().to_string().contains("exists"));
         assert!(app.new_folder(" / ").is_err());
+
+        // deleting a folder with what is in it: its subfolders go, its images go to the trash, the view moves on
+        let gone = app.model().catalog.find("旅行").unwrap().unwrap();
+        let inside = store::add(
+            &lib,
+            &png(dir.path(), "in.png", 9),
+            &NewImage {
+                via: "import".into(),
+                folder: Some(app.model().catalog.find("旅行/2026/春").unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .sha;
+        app.refresh();
+        app.apply(Action::View(View::Folder(app.model().catalog.find("旅行/2026").unwrap().unwrap())), Some(&ctx));
+        app.delete_folder(&gone).unwrap();
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert!(c.find("旅行").is_none() && c.find("旅行/2026/春").is_none());
+        assert!(c.is_trashed(&inside) && c.entry(&inside).folder.is_none());
+        assert_eq!(app.view, View::All);
+        app.apply(Action::Restore(vec![inside.clone()]), Some(&ctx));
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().entry(&inside), Default::default(), "restored: unfiled");
 
         // a folder's Copy path gives what a command takes
         assert_eq!(app.folder_arg(&folder), "trips/京都");

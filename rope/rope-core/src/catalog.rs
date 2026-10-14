@@ -206,6 +206,39 @@ impl Catalog {
         Ok(())
     }
 
+    /// Removes the folder at `path` with everything below it: its subfolders go, and its images go to the trash
+    /// (`at` is the time). They lose their folder, since it no longer exists, so a restore leaves them unfiled.
+    /// Returns how many folders went, and the images newly trashed.
+    pub fn remove_tree(&mut self, path: &str, at: &str) -> Result<(usize, Vec<String>)> {
+        let id = self.resolve(path)?.context("the top cannot be removed")?;
+        let doomed = self.subtree(&id);
+        let mut trashed = Vec::new();
+        for (sha, e) in self.items.iter_mut() {
+            if e.folder.as_ref().is_some_and(|f| doomed.contains(f)) {
+                if e.trashed.is_none() {
+                    e.trashed = Some(at.to_owned());
+                    trashed.push(sha.clone());
+                }
+                e.folder = None;
+            }
+        }
+        for f in &doomed {
+            self.folders.remove(f);
+        }
+        Ok((doomed.len(), trashed))
+    }
+
+    /// The images in a folder and the folders below it, outside the trash, and how many folders those are.
+    pub fn tree_size(&self, id: &str) -> (usize, usize) {
+        let folders = self.subtree(id);
+        let images = self
+            .items
+            .values()
+            .filter(|e| e.trashed.is_none() && e.folder.as_ref().is_some_and(|f| folders.contains(f)))
+            .count();
+        (folders.len(), images)
+    }
+
     /// The ids of a folder's ancestors, nearest first.
     fn ancestors(&self, id: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -442,6 +475,30 @@ mod tests {
         c.forget("img");
         c.rmdir("a").unwrap();
         assert!(c.folders.is_empty());
+    }
+
+    #[test]
+    fn remove_tree_trashes_the_images_and_drops_every_folder_below() {
+        let mut c = Catalog::default();
+        let a = c.mkdir("a", false).unwrap();
+        let b = c.mkdir("a/b", false).unwrap();
+        let keep = c.mkdir("keep", false).unwrap();
+        c.set_folder("1", Some(a.clone()));
+        c.set_folder("2", Some(b.clone()));
+        c.add_tag("2", "t").unwrap();
+        c.set_folder("3", Some(b));
+        c.trash("3", "earlier");
+        c.set_folder("4", Some(keep.clone()));
+        assert_eq!(c.tree_size(&a), (2, 2), "the trashed one is not counted");
+        let (folders, trashed) = c.remove_tree("a", "now").unwrap();
+        assert_eq!(folders, 2);
+        assert_eq!(trashed, ["1", "2"]);
+        assert_eq!(c.folders.keys().collect::<Vec<_>>(), [&keep]);
+        assert_eq!(c.entry("2"), Entry { folder: None, tags: vec!["t".into()], trashed: Some("now".into()) });
+        assert_eq!(c.entry("3").trashed.as_deref(), Some("earlier"), "already in the trash: left as it was");
+        assert!(c.entry("3").folder.is_none());
+        assert_eq!(c.entry("4").folder, Some(keep));
+        assert!(c.remove_tree("/", "now").is_err());
     }
 
     #[test]

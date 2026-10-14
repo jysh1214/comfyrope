@@ -131,8 +131,13 @@ enum Cmd {
         #[arg(required = true, num_args = 2..)]
         args: Vec<String>,
     },
-    /// Remove an empty folder
-    Rmdir { path: String },
+    /// Remove an empty folder; with -r, a folder with everything in it, its images going to the trash
+    Rmdir {
+        /// Also a folder that is not empty: remove its subfolders too, and move its images to the trash
+        #[arg(short)]
+        recursive: bool,
+        path: String,
+    },
     /// List a folder: its subfolders, then its images, oldest first
     Ls {
         /// The folder [default: the top, with the unfiled images]
@@ -314,7 +319,13 @@ fn run(cli: Cli) -> Result<()> {
             emit(json, json!({"folder": id}), || {})
         }
         Cmd::Mv { args } => mv(&lib, &args),
-        Cmd::Rmdir { path } => store::edit_catalog(&lib, "rmdir", &[], |c| c.rmdir(&path)),
+        Cmd::Rmdir { path, recursive: false } => store::edit_catalog(&lib, "rmdir", &[], |c| c.rmdir(&path)),
+        Cmd::Rmdir { path, recursive: true } => {
+            let (folders, trashed) = store::remove_folder_tree(&lib, &path)?;
+            emit(json, json!({"folders": folders, "trashed": trashed}), || {
+                println!("removed {folders} folder(s); moved {} image(s) to the trash", trashed.len())
+            })
+        }
         Cmd::Ls { folder, tag, trash, recursive, long } => {
             ls(&lib, json, folder.as_deref(), tag.as_deref(), trash, recursive, long)
         }

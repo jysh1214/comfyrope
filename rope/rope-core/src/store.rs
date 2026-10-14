@@ -500,6 +500,17 @@ pub fn edit_catalog<T>(
     Ok(out)
 }
 
+/// Removes the folder at `path` with everything below it, moving its images to the trash; returns how many folders
+/// went and the images newly trashed (see Catalog::remove_tree).
+pub fn remove_folder_tree(lib: &Library, path: &str) -> Result<(usize, Vec<String>)> {
+    let _lock = lib.lock()?;
+    let mut catalog = Catalog::load(lib)?;
+    let out = catalog.remove_tree(path, &time::now())?;
+    catalog.save(lib)?;
+    journal::append(lib, "rmdir", &out.1)?;
+    Ok(out)
+}
+
 fn existing_item(lib: &Library, sha: &str) -> Result<PathBuf> {
     let dir = lib.item_dir(sha);
     if !dir.join("meta.json").exists() {
