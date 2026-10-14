@@ -316,6 +316,12 @@ def upload_name(path: Path, stem: str = "", tag: str = "") -> str:
     return f"{digest}_{tag + '_' if tag else ''}{stem}{suffix}"
 
 
+def fresh_tag(kind: str) -> str:
+    """A tag for upload names that ComfyUI has not seen: it caches node results by their inputs, the image names
+    included, and answers an identical workflow with the old result instead of computing it again."""
+    return kind + uuid.uuid4().hex[:6]
+
+
 def default_sigint() -> None:
     """Runs in the child before exec: a script started in the background has SIGINT ignored, and the child
     would inherit that, so stop() could not shut ComfyUI down cleanly."""
@@ -966,7 +972,8 @@ def run_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
     import websocket
 
     status = Status()
-    names = [comfy.upload(p, upload_name(p, s)) for p, s in zip(a.uploads, a.upload_stems)]
+    tag = fresh_tag("f") if a.fresh else ""
+    names = [comfy.upload(p, upload_name(p, s, tag)) for p, s in zip(a.uploads, a.upload_stems)]
     system_prompt = comfy.enhancer_system_prompt() if a.enhance else None
     base = a.seed if a.seed is not None else random.randrange(2**32)
     a.when, a.server_info = time.localtime(), comfy.system_info()  # one time for all the folders of this run
@@ -1079,6 +1086,10 @@ def add_comfy_args(g) -> None:
     g.add_argument("--comfy-args", default="", metavar="ARGS",
                    help='extra flags for a ComfyUI this command starts, e.g. "--reserve-vram 2"')
     g.add_argument("--timeout", type=int, default=TIMEOUT, help=f"give up after this many seconds (default {TIMEOUT})")
+    g.add_argument("--fresh", action="store_true",
+                   help="compute the image again even when ComfyUI has the result of an identical workflow cached "
+                        "(the GPU's results differ slightly from run to run); the loaded models are kept. A replay "
+                        "is always fresh")
 
 
 def check_packages(needed: dict[str, str]) -> None:
@@ -1109,7 +1120,8 @@ def main(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="img2img-") as workdir:
         keep_inputs(a, Path(workdir))
         if a.dry_run:
-            names = [f"{UPLOAD_SUBFOLDER}/{upload_name(p, s)}" for p, s in zip(a.uploads, a.upload_stems)]
+            tag = "f000000" if a.fresh else ""  # the real tag is random
+            names = [f"{UPLOAD_SUBFOLDER}/{upload_name(p, s, tag)}" for p, s in zip(a.uploads, a.upload_stems)]
             system_prompt = "<system prompt from ComfyUI's Qwen-Image-2.1 edit template>" if a.enhance else None
             graph = build(a, names, a.seed if a.seed is not None else 0, system_prompt)
             print(json.dumps(graph.nodes, indent=2, ensure_ascii=False))
@@ -1312,10 +1324,10 @@ def replay_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
     import websocket
 
     status = Status()
-    tag = "r" + time.strftime("%H%M%S")  # a fresh name: ComfyUI would answer the same graph from its cache
+    tag = fresh_tag("r")
     names = []
     for i in a.inputs:
-        stem = re.sub(r"^[0-9a-f]{12}_(r\d{6}_)?", "", Path(i["recorded"] or i["path"].name).stem)
+        stem = re.sub(r"^[0-9a-f]{12}_([rf][0-9a-f]{6}_)?", "", Path(i["recorded"] or i["path"].name).stem)
         names.append(comfy.upload(i["path"], upload_name(i["path"], stem, tag)))
     a.when, a.server_info = time.localtime(), comfy.system_info()
     a.env, a.code, a.upload_names, a.keep = comfy_env(comfy), code_identity(), names, keep_replay

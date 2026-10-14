@@ -324,10 +324,12 @@ ComfyUI:
 | `--no-start` | Fail when no ComfyUI is running instead of starting one |
 | `--comfy-args "..."` | Extra flags for a ComfyUI this command starts, e.g. `"--reserve-vram 2"` |
 | `--timeout N` | Give up after N seconds; default 1800 |
+| `--fresh` | Compute the image again even when ComfyUI has cached the result of an identical workflow (same inputs, settings and seed); the loaded models are kept. GPU results differ slightly from run to run, so a fresh run is a new image |
 
 ### Tips
 
 - **Keep ComfyUI running between runs.** Start it with `run_comfyui.sh` in another zellij pane and `img2img.py` uses it, loading the models only once. A command that starts ComfyUI itself reloads about 30 GB of models every time.
+- **The same command twice gives the same image at once.** ComfyUI caches results: an identical workflow (same inputs, settings and seed) is answered from the cache, not computed again, and rope takes the bytes it already has. Change the seed for a new image, or add `--fresh` to compute the same settings again.
 - **Ctrl-C cancels.** Queued jobs are dropped and the running one is interrupted; a ComfyUI the command started is stopped too.
 - **Result PNGs carry their workflow.** Drop one on the ComfyUI page to see the workflow as a node graph, a good way into the UI.
 - **A missing model file comes with the fix.** For example, without the 8-step LoRA, ComfyUI rejects the workflow before running it, and the script prints the `download_models.py` command that fetches it.
