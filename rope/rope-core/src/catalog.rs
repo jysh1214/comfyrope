@@ -41,6 +41,9 @@ pub struct Entry {
     /// When it went into the trash. A trashed image keeps its folder and tags, for a restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trashed: Option<String>,
+    /// Marked as a favorite: shown first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favorite: bool,
 }
 
 impl Default for Catalog {
@@ -374,6 +377,20 @@ impl Catalog {
         self.items.get(sha).is_some_and(|e| e.trashed.is_some())
     }
 
+    pub fn is_favorite(&self, sha: &str) -> bool {
+        self.items.get(sha).is_some_and(|e| e.favorite)
+    }
+
+    /// Marks an image as a favorite, or unmarks it; returns whether that changed anything.
+    pub fn set_favorite(&mut self, sha: &str, favorite: bool) -> bool {
+        let mut changed = false;
+        self.update(sha, |e| {
+            changed = e.favorite != favorite;
+            e.favorite = favorite;
+        });
+        changed
+    }
+
     /// Drops an image's entry: folder, tags and trash.
     pub fn forget(&mut self, sha: &str) {
         self.items.remove(sha);
@@ -494,11 +511,28 @@ mod tests {
         assert_eq!(folders, 2);
         assert_eq!(trashed, ["1", "2"]);
         assert_eq!(c.folders.keys().collect::<Vec<_>>(), [&keep]);
-        assert_eq!(c.entry("2"), Entry { folder: None, tags: vec!["t".into()], trashed: Some("now".into()) });
+        assert_eq!(
+            c.entry("2"),
+            Entry { folder: None, tags: vec!["t".into()], trashed: Some("now".into()), favorite: false }
+        );
         assert_eq!(c.entry("3").trashed.as_deref(), Some("earlier"), "already in the trash: left as it was");
         assert!(c.entry("3").folder.is_none());
         assert_eq!(c.entry("4").folder, Some(keep));
         assert!(c.remove_tree("/", "now").is_err());
+    }
+
+    #[test]
+    fn a_favorite_is_an_entry_of_its_own_and_unmarking_drops_it() {
+        let mut c = Catalog::default();
+        assert!(c.set_favorite("img", true));
+        assert!(!c.set_favorite("img", true), "already one");
+        assert!(c.is_favorite("img"));
+        let json = serde_json::to_value(&c.items["img"]).unwrap();
+        assert_eq!(json, serde_json::json!({"favorite": true}));
+        assert!(c.set_favorite("img", false));
+        assert!(c.items.is_empty(), "nothing left to keep");
+        let plain: Entry = serde_json::from_value(serde_json::json!({"tags": ["a"]})).unwrap();
+        assert!(!plain.favorite, "older catalogs read as not favorite");
     }
 
     #[test]

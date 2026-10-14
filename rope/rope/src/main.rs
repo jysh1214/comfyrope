@@ -21,6 +21,7 @@ Examples:
   rope show 3fa9c1
   rope repro 3fa9c1                 # the command that makes it again
   rope tag add 海邊 @3fa9c1 @9b2e0f
+  rope fav @3fa9c1                  # a favorite: rope-gui shows it first
   rope mv @3fa9c1 @9b2e0f portraits # images into a folder; / is unfiled
   rope mv trips/kyoto travel/京都   # rename or move a folder
   rope rm @3fa9c1 && rope purge --trash
@@ -148,6 +149,9 @@ enum Cmd {
         /// What is in the trash
         #[arg(long)]
         trash: bool,
+        /// Only the favorites
+        #[arg(long)]
+        fav: bool,
         /// Include the images in subfolders
         #[arg(short, long)]
         recursive: bool,
@@ -186,6 +190,13 @@ enum Cmd {
     Tag(TagCmd),
     /// Every tag, with how many images have it
     Tags,
+    /// Mark images as favorites, which rope-gui shows first; --off unmarks them
+    Fav {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        off: bool,
+    },
     /// The images an image was made from (up), or that were made from it (down)
     Lineage {
         id: String,
@@ -326,8 +337,8 @@ fn run(cli: Cli) -> Result<()> {
                 println!("removed {folders} folder(s); moved {} image(s) to the trash", trashed.len())
             })
         }
-        Cmd::Ls { folder, tag, trash, recursive, long } => {
-            ls(&lib, json, folder.as_deref(), tag.as_deref(), trash, recursive, long)
+        Cmd::Ls { folder, tag, trash, fav, recursive, long } => {
+            ls(&lib, json, folder.as_deref(), tag.as_deref(), trash, fav, recursive, long)
         }
         Cmd::Tree => tree(&lib, json),
         Cmd::Show { id, downstream } => show(&lib, json, &id, downstream),
@@ -346,6 +357,13 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{n:>6}  {t}");
                 }
             })
+        }
+        Cmd::Fav { ids, off } => {
+            let shas = resolve_all(&lib, &ids)?;
+            let n = store::edit_catalog(&lib, "fav", &shas, |c| {
+                Ok(shas.iter().filter(|s| c.set_favorite(s, !off)).count())
+            })?;
+            emit(json, json!({"changed": n}), || {})
         }
         Cmd::Lineage { id, up, down } => lineage(&lib, json, &id, up, down),
         Cmd::Repro { id, command } => {
@@ -552,12 +570,14 @@ fn mv(lib: &Library, args: &[String]) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ls(
     lib: &Library,
     json: bool,
     folder: Option<&str>,
     tag: Option<&str>,
     trash: bool,
+    fav: bool,
     recursive: bool,
     long: bool,
 ) -> Result<()> {
@@ -598,8 +618,12 @@ fn ls(
                 .collect(),
         }
     };
-    let mut metas: Vec<Meta> =
-        wanted.iter().filter_map(|s| store::load(lib, s).ok()).filter(|m| m.kept.is_none()).collect();
+    let mut metas: Vec<Meta> = wanted
+        .iter()
+        .filter(|s| !fav || catalog.is_favorite(s))
+        .filter_map(|s| store::load(lib, s).ok())
+        .filter(|m| m.kept.is_none())
+        .collect();
     metas.sort_by(|a, b| (&a.added, &a.name).cmp(&(&b.added, &b.name)));
     if json {
         let images: Vec<Value> = metas.iter().map(|m| summary_json(lib, &catalog, m)).collect();
@@ -620,9 +644,11 @@ fn ls(
             let place = e.folder.map(|f| catalog.folder_path(&f)).unwrap_or_else(|| "/".into());
             let tags = if e.tags.is_empty() { String::new() } else { format!("  #{}", e.tags.join(" #")) };
             let made = if m.made.is_some() { "made" } else { "    " };
-            println!("{}  {when}  {size:>9}  {made}  {}  [{place}]{tags}", m.short(), m.name);
+            let heart = if e.favorite { "♥ " } else { "" };
+            println!("{}  {when}  {size:>9}  {made}  {heart}{}  [{place}]{tags}", m.short(), m.name);
         } else {
-            println!("{}  {when}  {}", m.short(), m.name);
+            let heart = if catalog.is_favorite(&m.sha256) { "♥ " } else { "" };
+            println!("{}  {when}  {heart}{}", m.short(), m.name);
         }
     }
     Ok(())
@@ -715,7 +741,7 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
         let v = json!({
             "id": sha, "short": meta.short(), "dir": dir, "path": store::image_path(lib, &meta), "name": meta.name,
             "folder": entry.folder.as_ref().map(|f| catalog.folder_path(f)), "tags": entry.tags,
-            "trashed": entry.trashed, "kept": meta.kept, "note": note, "inputs": inputs,
+            "trashed": entry.trashed, "favorite": entry.favorite, "kept": meta.kept, "note": note, "inputs": inputs,
             "downstream": children, "meta": meta, "graph": graph,
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -739,6 +765,9 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
     );
     if !entry.tags.is_empty() {
         println!("  tags     {}", entry.tags.join(", "));
+    }
+    if entry.favorite {
+        println!("  favorite ♥");
     }
     if let Some(t) = &entry.trashed {
         println!("  trash    since {t}");
@@ -928,7 +957,8 @@ fn summary_json(lib: &Library, catalog: &Catalog, m: &Meta) -> Value {
     let e = catalog.entry(&m.sha256);
     json!({"id": m.sha256, "short": m.short(), "name": m.name, "added": m.added, "path": store::image_path(lib, m),
            "width": m.image.width, "height": m.image.height, "made": m.made.is_some(),
-           "folder": e.folder.map(|f| catalog.folder_path(&f)), "tags": e.tags, "trashed": e.trashed})
+           "folder": e.folder.map(|f| catalog.folder_path(&f)), "tags": e.tags, "trashed": e.trashed,
+           "favorite": e.favorite})
 }
 
 /// `--into FOLDER` as the folder to file into: `None` without the flag.

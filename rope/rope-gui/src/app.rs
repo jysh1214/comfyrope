@@ -91,6 +91,8 @@ enum Action {
     Zoom(Option<f32>),
     ZoomBy(f32),
     ToggleInfo,
+    /// Mark these images as favorites, or, when all of them are already, unmark them.
+    ToggleFavorite(Vec<String>),
 }
 
 pub struct App {
@@ -448,6 +450,16 @@ impl App {
                 }
             }
             Action::ZoomBy(factor) => self.zoom_by(factor),
+            Action::ToggleFavorite(ids) => {
+                let on = !ids.iter().all(|s| self.model().catalog.is_favorite(s));
+                store::edit_catalog(&self.lib, "fav", &ids, |c| {
+                    ids.iter().for_each(|s| {
+                        c.set_favorite(s, on);
+                    });
+                    Ok(())
+                })?;
+                self.refresh();
+            }
             Action::ToggleInfo => {
                 if let Some(v) = self.viewer.as_mut() {
                     v.info = !v.info;
@@ -770,6 +782,15 @@ impl App {
                 );
             }
         }
+        let favorite = self.model.as_ref().is_some_and(|m| m.catalog.is_favorite(id));
+        let heart_rect = Rect::from_min_size(egui::pos2(square.max.x - 26.0, square.min.y + 4.0), Vec2::splat(22.0));
+        let heart = ui.interact(heart_rect, ui.id().with(("favorite", id)), Sense::click());
+        if favorite || resp.contains_pointer() {
+            paint_heart(ui.painter(), heart_rect.shrink(2.0), favorite, heart.hovered());
+        }
+        if heart.on_hover_text(if favorite { "remove from favorites (L)" } else { "add to favorites (L)" }).clicked() {
+            actions.push(Action::ToggleFavorite(vec![id.to_owned()]));
+        }
         let item = self.model.as_ref().and_then(|m| m.items.get(id)).expect("present");
         let label = Rect::from_min_max(
             egui::pos2(rect.min.x + 4.0, rect.max.y - LABEL),
@@ -842,6 +863,11 @@ impl App {
                 actions.push(Action::Dialog(Dialog::Tag { ids: targets.clone(), name: String::new() }));
                 ui.close();
             }
+            let all_favorite = targets.iter().all(|s| model.catalog.is_favorite(s));
+            if ui.button(if all_favorite { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                actions.push(Action::ToggleFavorite(targets.clone()));
+                ui.close();
+            }
             ui.separator();
             if trash_view {
                 if ui.button("Restore").clicked() {
@@ -893,11 +919,17 @@ impl App {
         let entry = catalog.entry(&id);
 
         ui.add_space(6.0);
-        let name =
-            ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY).font(egui::TextStyle::Heading));
-        if name.lost_focus() {
-            actions.push(Action::SaveName);
-        }
+        ui.horizontal(|ui| {
+            if heart_button(ui, entry.favorite).clicked() {
+                actions.push(Action::ToggleFavorite(vec![id.clone()]));
+            }
+            let name = ui.add(
+                egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY).font(egui::TextStyle::Heading),
+            );
+            if name.lost_focus() {
+                actions.push(Action::SaveName);
+            }
+        });
         let size = match (m.image.width, m.image.height) {
             (Some(w), Some(h)) => format!("{w}×{h}  "),
             _ => String::new(),
@@ -1319,6 +1351,9 @@ impl App {
         if copy && let Some(id) = self.selected.last() {
             actions.push(Action::CopyPath(id.clone()));
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::L)) && !self.selected.is_empty() {
+            actions.push(Action::ToggleFavorite(self.selected.clone()));
+        }
         let look = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
         if look && let Some(id) = self.selected.last() {
             actions.push(Action::Look(id.clone()));
@@ -1456,6 +1491,47 @@ impl App {
             self.apply(a, Some(ctx));
         }
     }
+}
+
+/// A heart filling `rect`: red for a favorite, else an outline, white when `hot`. Drawn rather than taken from a
+/// font, which may not have one.
+pub(crate) fn paint_heart(painter: &egui::Painter, rect: Rect, favorite: bool, hot: bool) {
+    // the classic parametric heart: x in -16..16, y in -17..12
+    let scale = rect.width().min(rect.height()) / 34.0;
+    let c = rect.center();
+    let n = 48;
+    let points: Vec<egui::Pos2> = (0..n)
+        .map(|k| {
+            let t = k as f32 / n as f32 * std::f32::consts::TAU;
+            let x = 16.0 * t.sin().powi(3);
+            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
+            egui::pos2(c.x + x * scale, c.y - (y + 2.5) * scale)
+        })
+        .collect();
+    let shadow = egui::Stroke::new(3.0, Color32::from_black_alpha(140));
+    painter.add(egui::Shape::closed_line(points.clone(), shadow));
+    if favorite {
+        // a fan from the middle: the heart is star-shaped around it, though not convex
+        let fill = Color32::from_rgb(232, 52, 72);
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(c, fill);
+        for p in &points {
+            mesh.colored_vertex(*p, fill);
+        }
+        for k in 0..n as u32 {
+            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % n as u32);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    let edge = if favorite || hot { Color32::WHITE } else { Color32::from_white_alpha(200) };
+    painter.add(egui::Shape::closed_line(points, egui::Stroke::new(1.3, edge)));
+}
+
+/// A clickable heart for marking a favorite.
+fn heart_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    paint_heart(ui.painter(), rect.shrink(2.0), favorite, resp.hovered());
+    resp.on_hover_text(if favorite { "remove from favorites (L)" } else { "add to favorites (L)" })
 }
 
 /// OK and Cancel; returns whether OK was pressed (or `enter_ok`). Cancel sets `done`.
@@ -1606,6 +1682,42 @@ mod tests {
         press(&ctx, &mut app, egui::Key::Backspace);
         assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&order[2]));
         let _ = (a, b, c);
+    }
+
+    #[test]
+    fn favorites_come_first_and_the_large_view_keeps_its_order_when_one_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let new = || NewImage { via: "import".into(), ..Default::default() };
+        for i in 1..=3 {
+            store::add(&lib, &png(dir.path(), &format!("{i}.png"), i), &new()).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 3);
+        let order = app.visible.clone();
+
+        // L in the grid marks the selection; the favorite moves to the front of the view
+        app.apply(Action::Select(order[2].clone(), Pick::One), Some(&ctx));
+        press(&ctx, &mut app, egui::Key::L);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_favorite(&order[2]));
+        frames_until(&ctx, &mut app, |a| a.visible[0] == order[2]);
+        assert_eq!(app.visible, [order[2].clone(), order[0].clone(), order[1].clone()]);
+
+        // in the large view, marking a favorite does not change which image comes next
+        let now = app.visible.clone();
+        app.apply(Action::Look(now[1].clone()), Some(&ctx));
+        press(&ctx, &mut app, egui::Key::L);
+        frames_until(&ctx, &mut app, |a| a.visible[1] == now[1] && a.visible[0] == now[0] || a.visible[0] == now[1]);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_favorite(&now[1]));
+        press(&ctx, &mut app, egui::Key::ArrowRight);
+        assert_eq!(app.viewer.as_ref().unwrap().id, now[2], "the next one in the order the viewer opened with");
+
+        // L again unmarks; the menu's toggle unmarks a whole selection when all are favorites
+        press(&ctx, &mut app, egui::Key::Escape);
+        app.apply(Action::ToggleFavorite(vec![now[0].clone(), now[1].clone()]), Some(&ctx));
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert!(!c.is_favorite(&now[0]) && !c.is_favorite(&now[1]));
     }
 
     #[test]

@@ -17,6 +17,9 @@ pub(super) struct Viewer {
     pub info: bool,
     /// The zoom that fits the image to the window, as last drawn.
     pub fit: f32,
+    /// The view's order when the viewer opened. Stepping follows it, so that marking a favorite, which moves the
+    /// image to the front of the view, does not change which image comes next.
+    pub order: Vec<String>,
 }
 
 /// How far one press of + or - zooms.
@@ -26,10 +29,14 @@ impl App {
     /// Opens the viewer on `id`.
     pub(super) fn look(&mut self, id: String) {
         let info = self.viewer.as_ref().is_some_and(|v| v.info);
+        let order = match self.viewer.take() {
+            Some(v) => v.order,
+            None => self.visible.clone(),
+        };
         self.selected = vec![id.clone()];
         self.anchor = Some(id.clone());
         self.load_detail(&id);
-        self.viewer = Some(Viewer { id, zoom: None, pan: Vec2::ZERO, info, fit: 1.0 });
+        self.viewer = Some(Viewer { id, zoom: None, pan: Vec2::ZERO, info, fit: 1.0, order });
     }
 
     /// Goes back to the grid, scrolled to the image last looked at.
@@ -42,13 +49,21 @@ impl App {
     /// The position of the image being looked at in the current view.
     fn place(&self) -> Option<usize> {
         let v = self.viewer.as_ref()?;
-        self.visible.iter().position(|id| *id == v.id)
+        self.order().iter().position(|id| **id == v.id)
     }
 
-    /// The image `by` places away in the current view, if there is one.
+    /// The viewer's order, without the images that have left the view since (trashed, say).
+    fn order(&self) -> Vec<&String> {
+        let Some(v) = &self.viewer else { return Vec::new() };
+        let shown: std::collections::HashSet<&String> = self.visible.iter().collect();
+        v.order.iter().filter(|id| shown.contains(id)).collect()
+    }
+
+    /// The image `by` places away in the viewer's order, if there is one.
     fn neighbor(&self, by: isize) -> Option<String> {
         let i = self.place()? as isize + by;
-        (0..self.visible.len() as isize).contains(&i).then(|| self.visible[i as usize].clone())
+        let order = self.order();
+        (0..order.len() as isize).contains(&i).then(|| order[i as usize].clone())
     }
 
     pub(super) fn step(&mut self, by: isize) {
@@ -76,7 +91,8 @@ impl App {
         }
         self.viewer_keys(ctx, actions);
         let Some(v) = &self.viewer else { return };
-        let (place, total) = (self.place(), self.visible.len());
+        let (place, total) = (self.place(), self.order().len());
+        let favorite = self.model().catalog.is_favorite(&v.id);
         let item = &self.model().items[&v.id];
         egui::TopBottomPanel::top("viewer-bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -103,6 +119,9 @@ impl App {
                     actions.push(Action::Step(1));
                 }
                 ui.separator();
+                if super::heart_button(ui, favorite).clicked() {
+                    actions.push(Action::ToggleFavorite(vec![v.id.clone()]));
+                }
                 ui.label(RichText::new(&item.name).strong());
                 let size = match (item.width, item.height) {
                     (Some(w), Some(h)) => format!("{w}×{h}"),
@@ -175,6 +194,11 @@ impl App {
             }
             if k(egui::Key::I) {
                 actions.push(Action::ToggleInfo);
+            }
+            if k(egui::Key::L)
+                && let Some(v) = &self.viewer
+            {
+                actions.push(Action::ToggleFavorite(vec![v.id.clone()]));
             }
             // Backspace too: what an Apple keyboard labels delete sends Backspace
             if k(egui::Key::Delete) || k(egui::Key::Backspace) {

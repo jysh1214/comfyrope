@@ -150,8 +150,8 @@ impl Model {
         !item.kept && !self.catalog.is_trashed(&item.id)
     }
 
-    /// The images of a view, newest first, filtered by `search` (in name, prompt and id). A folder's view holds
-    /// the images in that folder only, not those in its subfolders.
+    /// The images of a view, favorites first, then newest first, filtered by `search` (in name, prompt and id). A
+    /// folder's view holds the images in that folder only, not those in its subfolders.
     pub fn view(&self, view: &View, search: &str) -> Vec<String> {
         let search = search.trim().to_lowercase();
         let mut items: Vec<&Item> = self
@@ -169,7 +169,8 @@ impl Model {
                 in_view && (search.is_empty() || i.haystack.contains(&search))
             })
             .collect();
-        items.sort_by(|a, b| (&b.added, &b.id).cmp(&(&a.added, &a.id)));
+        let fav = |i: &Item| self.catalog.is_favorite(&i.id);
+        items.sort_by(|a, b| (fav(b), &b.added, &b.id).cmp(&(fav(a), &a.added, &a.id)));
         items.into_iter().map(|i| i.id.clone()).collect()
     }
 
@@ -217,6 +218,27 @@ mod tests {
         let model = Model::load(&lib).unwrap();
         assert_eq!(model.view(&View::Folder(a), ""), [top]);
         assert_eq!(model.view(&View::Folder(b), ""), [below]);
+    }
+
+    #[test]
+    fn favorites_come_first_then_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let ids: Vec<String> = (0..4u8)
+            .map(|i| {
+                let path = dir.path().join(format!("{i}.png"));
+                image::RgbImage::from_pixel(4, 4, image::Rgb([i, 0, 0])).save(&path).unwrap();
+                store::add(&lib, &path, &NewImage { via: "import".into(), ..Default::default() }).unwrap().sha
+            })
+            .collect();
+        store::edit_catalog(&lib, "fav", &[], |c| Ok((c.set_favorite(&ids[0], true), c.set_favorite(&ids[2], true))))
+            .unwrap();
+        let mut model = Model::load(&lib).unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            model.items.get_mut(id).unwrap().added = format!("2026-10-15T10:00:0{i}+08:00"); // ids[3] is the newest
+        }
+        let want: Vec<String> = [2, 0, 3, 1].iter().map(|&i| ids[i].clone()).collect();
+        assert_eq!(model.view(&View::All, ""), want);
     }
 
     /// cargo test --release -p rope-gui -- --ignored, with ROPE_BENCH_LIBRARY naming a large library.
