@@ -132,12 +132,12 @@ The window runs on its own: the command returns at once, and closing the termina
 **Middle:**
 
 - Thumbnails, newest first.
-- Click to select, Ctrl-click to add, Shift-click for a range. Double-click opens the default image viewer.
-- Right-click to copy the path or the repro command, move to a folder, add a tag, or trash.
+- Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
+- Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, or trash.
 
 **Right**, the selected image:
 
-- A preview and its name, which you can edit.
+- A preview (click it for the large view) and its name, which you can edit.
 - Copy path, Copy repro, Copy command and Delete buttons.
 - Its folder, tags and note.
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.
@@ -148,11 +148,27 @@ The window runs on its own: the command returns at once, and closing the termina
 | Key | Action |
 |---|---|
 | Arrow keys | Move the selection |
+| Enter, Space | View the selected image large |
 | Ctrl+A | Select all |
 | Delete | Move to the trash (in the trash: delete for good) |
 | Ctrl+C | Copy the path |
 | Esc | Clear the selection |
 | F5 | Reload |
+
+**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more.
+
+| Key or mouse | Action |
+|---|---|
+| ← → (or ↑ ↓, Space) | Previous / next image of the view |
+| Ctrl+wheel | Zoom around the cursor |
+| Drag | Pan, when zoomed |
+| Double-click, 1 | 100%: one image pixel per screen pixel |
+| F | Fit to the window |
+| + − | Zoom in / out |
+| I | Show or hide the details panel |
+| Delete | Move to the trash and go on to the next image (Undo in the status bar) |
+| Ctrl+C | Copy the path |
+| Esc | Back to the grid |
 
 **Importing:** Import… and Import folder… open the desktop's file dialog, which gives real paths.
 

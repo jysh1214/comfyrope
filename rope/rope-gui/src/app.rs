@@ -2,6 +2,8 @@
 //! on the right. Everything it changes goes through rope-core, like the CLI, so both can be used at once; it sees
 //! changes made elsewhere through the journal.
 
+mod viewer;
+
 use crate::model::{Model, View};
 use crate::thumbs::{self, Key, Source, Thumbs};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Vec2};
@@ -76,6 +78,16 @@ enum Action {
         folders: bool,
     },
     Undo,
+    /// Look at an image as large as the window allows.
+    Look(String),
+    CloseLook,
+    /// Look at the image this many places away in the view.
+    Step(isize),
+    TrashAndStep,
+    /// Screen points per image pixel; `None` fits the image to the window.
+    Zoom(Option<f32>),
+    ZoomBy(f32),
+    ToggleInfo,
 }
 
 pub struct App {
@@ -99,6 +111,8 @@ pub struct App {
     tasks: Vec<Receiver<Result<String, String>>>,
     scroll_to: Option<String>,
     open_on_load: Option<String>,
+    /// Looking at one image as large as the window allows.
+    viewer: Option<viewer::Viewer>,
 }
 
 impl App {
@@ -145,6 +159,7 @@ impl App {
             tasks: Vec::new(),
             scroll_to: None,
             open_on_load: open,
+            viewer: None,
         };
         match watcher {
             Ok(w) => app._watcher = Some(w),
@@ -420,6 +435,21 @@ impl App {
                 }
             }
             Action::Import { folders } => self.import(folders, ctx),
+            Action::Look(id) => self.look(id),
+            Action::CloseLook => self.close_look(),
+            Action::Step(by) => self.step(by),
+            Action::TrashAndStep => self.trash_and_step(ctx),
+            Action::Zoom(zoom) => {
+                if let Some(v) = self.viewer.as_mut() {
+                    (v.zoom, v.pan) = (zoom, Vec2::ZERO);
+                }
+            }
+            Action::ZoomBy(factor) => self.zoom_by(factor),
+            Action::ToggleInfo => {
+                if let Some(v) = self.viewer.as_mut() {
+                    v.info = !v.info;
+                }
+            }
             Action::Undo => {
                 if let Some((what, ids)) = self.undo.take()
                     && what == "restore"
@@ -752,7 +782,7 @@ impl App {
             actions.push(Action::Select(id.to_owned(), pick));
         }
         if resp.double_clicked() {
-            actions.push(Action::External(id.to_owned()));
+            actions.push(Action::Look(id.to_owned()));
         }
         let targets: Vec<String> = if selected { self.selected.clone() } else { vec![id.to_owned()] };
         let trash_view = self.view == View::Trash;
@@ -769,7 +799,11 @@ impl App {
                 actions.push(Action::CopyRepro(id.to_owned()));
                 ui.close();
             }
-            if ui.button("Open in viewer").clicked() {
+            if ui.button("View large").clicked() {
+                actions.push(Action::Look(id.to_owned()));
+                ui.close();
+            }
+            if ui.button("Open in external viewer").clicked() {
                 actions.push(Action::External(id.to_owned()));
                 ui.close();
             }
@@ -833,8 +867,8 @@ impl App {
             egui::Image::new(&tex)
                 .paint_at(ui, Rect::from_center_size(rect.center(), fit(tex.size_vec2(), rect.size())));
         }
-        if resp.on_hover_text("double-click: open in the image viewer").double_clicked() {
-            actions.push(Action::External(id.clone()));
+        if self.viewer.is_none() && resp.on_hover_text("click: view large").clicked() {
+            actions.push(Action::Look(id.clone()));
         }
         let m = &d.meta;
         let catalog = &self.model.as_ref().expect("loaded").catalog;
@@ -1252,6 +1286,10 @@ impl App {
         if copy && let Some(id) = self.selected.last() {
             actions.push(Action::CopyPath(id.clone()));
         }
+        let look = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
+        if look && let Some(id) = self.selected.last() {
+            actions.push(Action::Look(id.clone()));
+        }
         if f5 {
             self.model = None;
             let (tx, rx) = channel();
@@ -1339,6 +1377,14 @@ impl App {
             return;
         }
         self.update_visible();
+        if self.viewer.is_some() {
+            self.viewer_frame(ctx, &mut actions);
+            self.dialogs(ctx);
+            for a in actions {
+                self.apply(a, Some(ctx));
+            }
+            return;
+        }
         self.shortcuts(ctx, &mut actions);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1452,6 +1498,73 @@ mod tests {
         panic!("the window never got there");
     }
 
+    /// Draws one frame in which `key` is pressed.
+    fn press(ctx: &egui::Context, app: &mut App, key: egui::Key) {
+        let event = egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+            events: vec![event],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.frame(ctx));
+    }
+
+    #[test]
+    fn the_large_view_steps_zooms_trashes_and_goes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let new = || NewImage { via: "import".into(), ..Default::default() };
+        // three images, the newest first in the grid: c, b, a
+        let ids: Vec<String> =
+            (1..=3).map(|i| store::add(&lib, &png(dir.path(), &format!("{i}.png"), i), &new()).unwrap().sha).collect();
+        let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 3);
+        let order = app.visible.clone();
+
+        // Enter on the selection opens it large, and the full-size texture arrives
+        app.apply(Action::Select(order[0].clone(), Pick::One), Some(&ctx));
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert_eq!(app.viewer.as_ref().map(|v| v.id.clone()), Some(order[0].clone()));
+        frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: order[0].clone(), size: thumbs::VIEW }));
+
+        // arrows step through the view, and stop at its ends
+        press(&ctx, &mut app, egui::Key::ArrowRight);
+        assert_eq!(app.viewer.as_ref().unwrap().id, order[1]);
+        press(&ctx, &mut app, egui::Key::ArrowLeft);
+        press(&ctx, &mut app, egui::Key::ArrowLeft);
+        assert_eq!(app.viewer.as_ref().unwrap().id, order[0]);
+
+        // 1 is 100%, + zooms in, F fits again; I shows the details next to the image
+        press(&ctx, &mut app, egui::Key::Num1);
+        assert_eq!(app.viewer.as_ref().unwrap().zoom, Some(1.0 / ctx.pixels_per_point()));
+        press(&ctx, &mut app, egui::Key::Plus);
+        assert!(app.viewer.as_ref().unwrap().zoom.unwrap() > 1.0 / ctx.pixels_per_point());
+        press(&ctx, &mut app, egui::Key::F);
+        assert_eq!(app.viewer.as_ref().unwrap().zoom, None);
+        press(&ctx, &mut app, egui::Key::I);
+        frames_until(&ctx, &mut app, |a| a.viewer.as_ref().is_some_and(|v| v.info));
+
+        // Delete trashes the image and goes on to the next one
+        press(&ctx, &mut app, egui::Key::Delete);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&order[0]));
+        assert_eq!(app.viewer.as_ref().unwrap().id, order[1]);
+        frames_until(&ctx, &mut app, |a| a.visible.len() == 2);
+
+        // Esc goes back to the grid, on the image last looked at
+        press(&ctx, &mut app, egui::Key::Escape);
+        assert!(app.viewer.is_none());
+        assert_eq!(app.selected, [order[1].clone()]);
+        let _ = (a, b, c);
+    }
+
     #[test]
     fn the_window_draws_every_view_and_its_actions_reach_the_library() {
         let dir = tempfile::tempdir().unwrap();
@@ -1484,7 +1597,9 @@ mod tests {
         frames_until(&ctx, &mut app, |a| a.detail.as_ref().is_some_and(|d| d.id == result));
         assert_eq!(app.view, View::Unfiled, "opening an image shows its folder");
         // the grid thumbnail and the preview get decoded and cached
-        frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: result.clone(), size: thumbs::PREVIEW }));
+        frames_until(&ctx, &mut app, |a| {
+            [thumbs::PREVIEW, thumbs::GRID].iter().all(|&size| a.thumbs.ready(&Key { id: result.clone(), size }))
+        });
         assert!(lib.cache_dir().join("thumbs").join(&result[..2]).join(format!("{result}.jpg")).exists());
 
         // upstream link: opening the photo switches to its folder

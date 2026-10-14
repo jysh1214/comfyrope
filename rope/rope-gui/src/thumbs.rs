@@ -15,7 +15,13 @@ use std::sync::{Arc, Condvar, Mutex};
 pub const GRID: u32 = 256;
 /// The preview in the details panel.
 pub const PREVIEW: u32 = 1024;
+/// The large view: enough for a 4K screen, and within every GPU's texture size limit.
+pub const VIEW: u32 = 4096;
 const KEEP: usize = 600;
+/// How many previews and large views stay on the GPU. A large view takes up to 64 MB, and ComfyUI wants the
+/// GPU's memory more.
+const KEEP_PREVIEW: usize = 24;
+const KEEP_VIEW: usize = 4;
 const QUEUE: usize = 300;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -111,11 +117,19 @@ impl Thumbs {
                 }
             }
         }
-        if self.textures.len() > KEEP {
-            let mut by_age: Vec<(u64, Key)> = self.textures.iter().map(|(k, (_, used))| (*used, k.clone())).collect();
-            by_age.sort_by_key(|(used, _)| *used);
-            for (_, k) in by_age.into_iter().take(self.textures.len() - KEEP) {
-                self.textures.remove(&k);
+        for (size, keep) in [(None, KEEP), (Some(PREVIEW), KEEP_PREVIEW), (Some(VIEW), KEEP_VIEW)] {
+            let mut by_age: Vec<(u64, Key)> = self
+                .textures
+                .iter()
+                .filter(|(k, _)| size.is_none_or(|s| k.size == s))
+                .map(|(k, (_, used))| (*used, k.clone()))
+                .collect();
+            if by_age.len() > keep {
+                by_age.sort_by_key(|(used, _)| *used);
+                let drop = by_age.len() - keep;
+                for (_, k) in by_age.into_iter().take(drop) {
+                    self.textures.remove(&k);
+                }
             }
         }
     }
@@ -151,7 +165,9 @@ fn load(req: &Request, cache: &std::path::Path) -> Option<ColorImage> {
     }
     let img =
         decode::open(&req.source.file).or_else(|e| req.source.fallback.as_deref().map_or(Err(e), decode::open)).ok()?;
-    let small = img.thumbnail(req.key.size, req.key.size);
+    // scaled down only: an image smaller than the size asked for stays as it is
+    let max = req.key.size;
+    let small = if img.width() > max || img.height() > max { img.thumbnail(max, max) } else { img };
     if let Some(c) = cached
         && c.parent().is_some_and(|p| std::fs::create_dir_all(p).is_ok())
     {

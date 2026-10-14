@@ -25,6 +25,8 @@ pub struct Item {
     pub file: PathBuf,
     /// A converted copy to show when `file` cannot be decoded here (camera RAW).
     pub fallback: Option<PathBuf>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
     pub made: bool,
     pub upstream: Vec<String>,
     /// Purged, but kept because images were made from it: shown only in lineages.
@@ -48,6 +50,8 @@ impl Item {
             added: m.added.clone(),
             file: dir.join(&m.file),
             fallback,
+            width: m.image.width,
+            height: m.image.height,
             made: m.made.is_some(),
             upstream: m.upstream(),
             kept: m.kept.is_some(),
