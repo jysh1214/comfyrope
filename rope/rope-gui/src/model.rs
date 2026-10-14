@@ -150,13 +150,10 @@ impl Model {
         !item.kept && !self.catalog.is_trashed(&item.id)
     }
 
-    /// The images of a view, newest first, filtered by `search` (in name, prompt and id).
+    /// The images of a view, newest first, filtered by `search` (in name, prompt and id). A folder's view holds
+    /// the images in that folder only, not those in its subfolders.
     pub fn view(&self, view: &View, search: &str) -> Vec<String> {
         let search = search.trim().to_lowercase();
-        let folders = match view {
-            View::Folder(id) => Some(self.catalog.subtree(id)),
-            _ => None,
-        };
         let mut items: Vec<&Item> = self
             .items
             .values()
@@ -165,10 +162,7 @@ impl Model {
                 let in_view = match view {
                     View::All => self.shown(i),
                     View::Unfiled => self.shown(i) && e.is_none_or(|e| e.folder.is_none()),
-                    View::Folder(_) => {
-                        self.shown(i)
-                            && e.and_then(|e| e.folder.as_ref()).is_some_and(|f| folders.as_ref().unwrap().contains(f))
-                    }
+                    View::Folder(id) => self.shown(i) && e.is_some_and(|e| e.folder.as_ref() == Some(id)),
                     View::Tag(t) => self.shown(i) && e.is_some_and(|e| e.tags.contains(t)),
                     View::Trash => !i.kept && self.catalog.is_trashed(&i.id),
                 };
@@ -204,6 +198,26 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rope_core::store::NewImage;
+
+    #[test]
+    fn a_folder_shows_its_own_images_not_those_of_its_subfolders() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let (a, b) =
+            store::edit_catalog(&lib, "mkdir", &[], |c| Ok((c.mkdir("a", false)?, c.mkdir("a/b", false)?))).unwrap();
+        let add = |name: &str, seed: u8, folder: &str| {
+            let path = dir.path().join(name);
+            image::RgbImage::from_pixel(4, 4, image::Rgb([seed, 0, 0])).save(&path).unwrap();
+            let new = NewImage { via: "import".into(), folder: Some(Some(folder.to_owned())), ..Default::default() };
+            store::add(&lib, &path, &new).unwrap().sha
+        };
+        let top = add("top.png", 1, &a);
+        let below = add("below.png", 2, &b);
+        let model = Model::load(&lib).unwrap();
+        assert_eq!(model.view(&View::Folder(a), ""), [top]);
+        assert_eq!(model.view(&View::Folder(b), ""), [below]);
+    }
 
     /// cargo test --release -p rope-gui -- --ignored, with ROPE_BENCH_LIBRARY naming a large library.
     #[test]

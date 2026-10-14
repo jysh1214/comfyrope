@@ -131,7 +131,7 @@ The window runs on its own: the command returns at once, and closing the termina
 
 **Middle:**
 
-- Thumbnails, newest first.
+- Thumbnails, newest first: of the folder chosen on the left, without the images in its subfolders.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, or trash.
 
