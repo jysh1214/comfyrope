@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["rope-core", "rope", "rope-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# File::lock (the library lock) is stable since 1.89
+rust-version = "1.89"
