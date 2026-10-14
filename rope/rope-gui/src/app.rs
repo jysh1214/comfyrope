@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant, SystemTime};
 
+/// Why the repro buttons of an image are disabled.
+const NO_RECIPE: &str = "no recipe: rope did not see this image being made, so there is nothing to repeat";
+
 const THUMB: f32 = 168.0;
 const LABEL: f32 = 22.0;
 const SMALL: f32 = 72.0;
@@ -787,6 +790,7 @@ impl App {
         let targets: Vec<String> = if selected { self.selected.clone() } else { vec![id.to_owned()] };
         let trash_view = self.view == View::Trash;
         let model = self.model.as_ref().expect("loaded");
+        let made = model.items.get(id).is_some_and(|i| i.made);
         resp.context_menu(|ui| {
             if !selected {
                 actions.push(Action::Select(id.to_owned(), Pick::One));
@@ -795,7 +799,8 @@ impl App {
                 actions.push(Action::CopyPath(id.to_owned()));
                 ui.close();
             }
-            if ui.button("Copy repro command").clicked() {
+            let repro = ui.add_enabled(made, egui::Button::new("Copy repro command"));
+            if repro.on_disabled_hover_text(NO_RECIPE).clicked() {
                 actions.push(Action::CopyRepro(id.to_owned()));
                 ui.close();
             }
@@ -908,6 +913,7 @@ impl App {
                 if ui
                     .button("Copy repro")
                     .on_hover_text("the command that makes this image again (img2img.py --replay)")
+                    .on_disabled_hover_text(NO_RECIPE)
                     .clicked()
                 {
                     actions.push(Action::CopyRepro(id.clone()));
@@ -915,6 +921,7 @@ impl App {
                 if ui
                     .button("Copy command")
                     .on_hover_text("the full img2img.py command, to change and run as a variation")
+                    .on_disabled_hover_text(NO_RECIPE)
                     .clicked()
                 {
                     actions.push(Action::CopyCommand(id.clone()));
