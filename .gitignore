@@ -5,8 +5,6 @@
 /ComfyUI/
 # download_models.py: about 54 GB of model files, plus *.part while downloading
 /models/
-# img2img.py: one folder per result, with the PNG and repro.sh
-/outputs/
 # rope: the Rust build output
 /rope/target/
 
