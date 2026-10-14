@@ -98,7 +98,7 @@ An image's id is the SHA-256 of its file:
 | `rope rmdir [-r] F` | Remove an empty folder; with `-r`, a folder with everything in it: its subfolders go, and its images move to the trash (restored, they come back unfiled) |
 | `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image in a folder recursively, all into F; `--tag` repeats |
 | `rope import --tree DIR... [--into F]` | Make each disk folder a rope folder of the same name, with its subfolders, in F or at the top |
-| `rope ls [F] [-r] [-l] [--tag T] [--fav] [--trash]` | List a folder; without F, the unfiled images. Favorites are marked ♥ |
+| `rope ls [F] [-r] [-l] [--tag T] [--fav] [--trash]` | List a folder; without F, the unfiled images. Favorites are marked ★ |
 | `rope tree` | The folder tree with image counts, and every tag |
 | `rope show ID` | Everything about an image: path, sources, recipe, upstream and downstream, note |
 | `rope path ID` | The absolute path of the image's file in the library |
@@ -133,13 +133,13 @@ The window runs on its own: the command returns at once, and closing the termina
 **Middle:**
 
 - Thumbnails of the folder chosen on the left, without the images in its subfolders: favorites first, then the newest first.
-- A heart in a thumbnail's top-right corner marks it as a favorite: red when it is one, an outline on hover otherwise. Click it, or press L.
+- A star in a thumbnail's top-right corner marks it as a favorite: gold when it is one, an outline on hover otherwise. Click it, or press L.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
 
 **Right**, the selected image:
 
-- A preview (click it for the large view), the favorite heart, and the name, which you can edit.
+- A preview (click it for the large view), the favorite star, and the name, which you can edit.
 - Copy path, Copy repro, Copy command and Delete buttons.
 - Its folder, tags and note.
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.

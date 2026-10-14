@@ -119,7 +119,7 @@ impl App {
                     actions.push(Action::Step(1));
                 }
                 ui.separator();
-                if super::heart_button(ui, favorite).clicked() {
+                if super::star_button(ui, favorite).clicked() {
                     actions.push(Action::ToggleFavorite(vec![v.id.clone()]));
                 }
                 ui.label(RichText::new(&item.name).strong());

@@ -783,12 +783,12 @@ impl App {
             }
         }
         let favorite = self.model.as_ref().is_some_and(|m| m.catalog.is_favorite(id));
-        let heart_rect = Rect::from_min_size(egui::pos2(square.max.x - 26.0, square.min.y + 4.0), Vec2::splat(22.0));
-        let heart = ui.interact(heart_rect, ui.id().with(("favorite", id)), Sense::click());
+        let star_rect = Rect::from_min_size(egui::pos2(square.max.x - 26.0, square.min.y + 4.0), Vec2::splat(22.0));
+        let star = ui.interact(star_rect, ui.id().with(("favorite", id)), Sense::click());
         if favorite || resp.contains_pointer() {
-            paint_heart(ui.painter(), heart_rect.shrink(2.0), favorite, heart.hovered());
+            paint_star(ui.painter(), star_rect.shrink(2.0), favorite, star.hovered());
         }
-        if heart.on_hover_text(if favorite { "remove from favorites (L)" } else { "add to favorites (L)" }).clicked() {
+        if star.on_hover_text(if favorite { "remove from favorites (L)" } else { "add to favorites (L)" }).clicked() {
             actions.push(Action::ToggleFavorite(vec![id.to_owned()]));
         }
         let item = self.model.as_ref().and_then(|m| m.items.get(id)).expect("present");
@@ -920,7 +920,7 @@ impl App {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if heart_button(ui, entry.favorite).clicked() {
+            if star_button(ui, entry.favorite).clicked() {
                 actions.push(Action::ToggleFavorite(vec![id.clone()]));
             }
             let name = ui.add(
@@ -1493,44 +1493,44 @@ impl App {
     }
 }
 
-/// A heart filling `rect`: red for a favorite, else an outline, white when `hot`. Drawn rather than taken from a
-/// font, which may not have one.
-pub(crate) fn paint_heart(painter: &egui::Painter, rect: Rect, favorite: bool, hot: bool) {
-    // the classic parametric heart: x in -16..16, y in -17..12
-    let scale = rect.width().min(rect.height()) / 34.0;
+/// A five-pointed star filling `rect`: filled gold for a favorite, else an outline, brighter when `hot`. Drawn
+/// with lines rather than taken from a font, so it is crisp at this size on every machine.
+pub(crate) fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, hot: bool) {
     let c = rect.center();
-    let n = 48;
-    let points: Vec<egui::Pos2> = (0..n)
+    let outer = rect.width().min(rect.height()) / 2.0;
+    let inner = outer * 0.42;
+    let points: Vec<egui::Pos2> = (0..10)
         .map(|k| {
-            let t = k as f32 / n as f32 * std::f32::consts::TAU;
-            let x = 16.0 * t.sin().powi(3);
-            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
-            egui::pos2(c.x + x * scale, c.y - (y + 2.5) * scale)
+            let angle = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::PI / 5.0;
+            let r = if k % 2 == 0 { outer } else { inner };
+            egui::pos2(c.x + r * angle.cos(), c.y + r * angle.sin())
         })
         .collect();
-    let shadow = egui::Stroke::new(3.0, Color32::from_black_alpha(140));
-    painter.add(egui::Shape::closed_line(points.clone(), shadow));
     if favorite {
-        // a fan from the middle: the heart is star-shaped around it, though not convex
-        let fill = Color32::from_rgb(232, 52, 72);
+        let fill = Color32::from_rgb(250, 190, 40);
+        // a fan from the middle: a star is star-shaped around its center
         let mut mesh = egui::Mesh::default();
         mesh.colored_vertex(c, fill);
         for p in &points {
             mesh.colored_vertex(*p, fill);
         }
-        for k in 0..n as u32 {
-            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % n as u32);
+        for k in 0..10u32 {
+            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % 10);
         }
         painter.add(egui::Shape::mesh(mesh));
+        painter.add(egui::Shape::closed_line(points, egui::Stroke::new(1.0, Color32::from_rgb(140, 95, 10))));
+    } else {
+        // an outline that reads on a light image as well as a dark one
+        painter.add(egui::Shape::closed_line(points.clone(), egui::Stroke::new(2.5, Color32::from_black_alpha(110))));
+        let edge = if hot { Color32::WHITE } else { Color32::from_white_alpha(190) };
+        painter.add(egui::Shape::closed_line(points, egui::Stroke::new(1.2, edge)));
     }
-    let edge = if favorite || hot { Color32::WHITE } else { Color32::from_white_alpha(200) };
-    painter.add(egui::Shape::closed_line(points, egui::Stroke::new(1.3, edge)));
 }
 
-/// A clickable heart for marking a favorite.
-fn heart_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
+/// A clickable star for marking a favorite.
+fn star_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
-    paint_heart(ui.painter(), rect.shrink(2.0), favorite, resp.hovered());
+    paint_star(ui.painter(), rect.shrink(2.0), favorite, resp.hovered());
     resp.on_hover_text(if favorite { "remove from favorites (L)" } else { "add to favorites (L)" })
 }
 

@@ -644,11 +644,11 @@ fn ls(
             let place = e.folder.map(|f| catalog.folder_path(&f)).unwrap_or_else(|| "/".into());
             let tags = if e.tags.is_empty() { String::new() } else { format!("  #{}", e.tags.join(" #")) };
             let made = if m.made.is_some() { "made" } else { "    " };
-            let heart = if e.favorite { "♥ " } else { "" };
-            println!("{}  {when}  {size:>9}  {made}  {heart}{}  [{place}]{tags}", m.short(), m.name);
+            let star = if e.favorite { "★ " } else { "" };
+            println!("{}  {when}  {size:>9}  {made}  {star}{}  [{place}]{tags}", m.short(), m.name);
         } else {
-            let heart = if catalog.is_favorite(&m.sha256) { "♥ " } else { "" };
-            println!("{}  {when}  {heart}{}", m.short(), m.name);
+            let star = if catalog.is_favorite(&m.sha256) { "★ " } else { "" };
+            println!("{}  {when}  {star}{}", m.short(), m.name);
         }
     }
     Ok(())
@@ -767,7 +767,7 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
         println!("  tags     {}", entry.tags.join(", "));
     }
     if entry.favorite {
-        println!("  favorite ♥");
+        println!("  favorite ★");
     }
     if let Some(t) = &entry.trashed {
         println!("  trash    since {t}");
