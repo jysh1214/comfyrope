@@ -243,7 +243,7 @@ rope/target/release/rope mkdir -p trips/京都
 ./img2img.py @3fa9c1 "把天空換成星空" --into trips/京都   # an image in rope as the input; its lineage is recorded
 ```
 
-Every input goes into rope too: the original file, and for HEIC, RAW and the like, the PNG actually uploaded. rope also records the workflow that was sent, the 2.1 prompt enhancer's rewrite, the ComfyUI and package versions, and the model files. So a result can be made again after its inputs or the repo move, or `img2img.py` changes. [rope/README.md](rope/README.md) covers the library, the GUI and how to build or install rope.
+Every input goes into rope too: the original file, and for HEIC, RAW and the like, the PNG actually uploaded. rope also records the workflow that was sent, the 2.1 prompt enhancer's rewrite, the ComfyUI and package versions, and the SHA-256 of each model file. So a result can be made again after its inputs or the repo move, or `img2img.py` changes. [rope/README.md](rope/README.md) covers the library, the GUI and how to build or install rope.
 
 Results are named `<start time>_<first input's name>_<model>_s<seed>`, for example `20261013-225301_photo_2511_s3418827001`:
 

@@ -202,7 +202,7 @@ On every run:
    - the workflow that was sent;
    - the rewrite of 2.1's prompt enhancer;
    - the ComfyUI version and commit, package versions, and the GPU;
-   - the size and modification time of every model file, and the version of `img2img.py`.
+   - the SHA-256 of every model file and LoRA, and the version of `img2img.py`. A model file is read once for its hash: the result is cached in `.cache/model-sha256.json` by file identity (device, inode, size, modification time), and the hashing runs alongside the GPU work. The first run reads the default 2511 set, about 31 GB.
 4. With `--into`, unfiled inputs go into that folder too.
 
 | Option | Description |
@@ -224,7 +224,7 @@ Copy repro and `rope repro ID` both give `img2img.py --replay ID`. Each image's 
 `--replay` does this, in order:
 
 1. It takes the bytes that were uploaded back then from rope, and sends the workflow recorded then. Changes to constants hard-coded in `img2img.py` (`shift=3.1`, the sampler, …) therefore do not change the result. Before sending, it lists how the workflow today's `img2img.py` would build differs; `--rebuild` sends that one instead.
-2. It also lists what else differs from then: ComfyUI and package versions, and model files replaced by a file of the same name.
+2. It also lists what else differs from then: ComfyUI and package versions, and model files whose content is not what it was (by SHA-256, so a download of the same file again is not reported).
 3. For 2.1 with `--enhance`, it reuses the prompt the enhancer wrote then and skips the enhancer, which samples and would most likely write a different prompt. `--rerun-enhancer` runs it again.
 4. It uploads the inputs under new names. Otherwise a ComfyUI process that has seen the exact same workflow answers from its cache and recomputes nothing.
 5. It compares the decoded pixels, not the files:

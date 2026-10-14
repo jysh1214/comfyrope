@@ -593,25 +593,116 @@ MODEL_INPUTS = {"UNETLoader": ("diffusion_models", "unet_name"), "CLIPLoader": (
                 "VAELoader": ("vae", "vae_name"), "LoraLoaderModelOnly": ("loras", "lora_name")}
 
 
-def model_files(nodes: dict) -> list[dict]:
-    """Every model file a workflow loads, with its size and modification time: a cheap check that a file of the same
-    name was not replaced, which a name alone cannot show (both Lightning LoRAs are 849608296 bytes)."""
+MODEL_ROOTS = (HERE / "models", HERE / "ComfyUI" / "models")  # where ComfyUI finds them, in its order
+
+
+class ModelHashes:
+    """SHA-256 of model files, cached in the library by file identity (device, inode, size, modification time):
+    each file is read once, about 30 s for the default 58 GB, and again only when it changes. A file moved within
+    its file system, say with the whole repo, keeps its entry."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.known = self.load()
+
+    def load(self) -> dict:
+        try:
+            return json.loads(self.path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def key(st: os.stat_result) -> str:
+        return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}"
+
+    def cached(self, st: os.stat_result) -> str | None:
+        return self.known.get(self.key(st))
+
+    def get(self, path: Path, st: os.stat_result) -> str:
+        key = self.key(st)
+        if key not in self.known:
+            with open(path, "rb") as f:
+                self.known[key] = hashlib.file_digest(f, "sha256").hexdigest()
+            self.save()
+        return self.known[key]
+
+    def save(self) -> None:
+        """Merges with what another run may have saved meanwhile, and replaces the file in one step."""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            merged = self.load() | self.known
+            tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(merged, indent=1), "utf-8")
+            tmp.replace(self.path)
+        except OSError:
+            pass  # only a cache: the hash is computed again next time
+
+
+def model_paths(nodes: dict) -> list[tuple[dict, Path | None]]:
+    """Every model file a workflow loads, once each: its record ({"dir", "name"}) and where it is, if anywhere."""
     out = []
     for node in nodes.values():
         kind = MODEL_INPUTS.get(node["class_type"])
         if not kind or not isinstance(node["inputs"].get(kind[1]), str):
             continue
         entry = {"dir": kind[0], "name": node["inputs"][kind[1]]}
-        if entry in [{k: o[k] for k in ("dir", "name")} for o in out]:
+        if entry in [e for e, _ in out]:
             continue
-        for base in (HERE / "models", HERE / "ComfyUI" / "models"):
-            path = base / kind[0] / entry["name"]
-            if path.exists():
-                st = path.stat()
-                entry |= {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
-                break
+        found = next((p for p in (root / kind[0] / entry["name"] for root in MODEL_ROOTS) if p.exists()), None)
+        out.append((entry, found))
+    return out
+
+
+def model_files(nodes: dict, hashes: ModelHashes) -> list[dict]:
+    """Every model file a workflow loads, with its SHA-256, size and modification time. The name alone says little:
+    a file can be replaced under the same name, a LoRA retrained, a download repeated."""
+    out = []
+    for entry, path in model_paths(nodes):
+        if path is not None:
+            st = path.stat()
+            entry |= {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+            try:
+                entry["sha256"] = hashes.get(path, st)
+            except OSError:
+                pass
         out.append(entry)
     return out
+
+
+def start_model_files(a: argparse.Namespace, nodes: dict):
+    """model_files() in the background, so that hashing a new model file overlaps the GPU work. Says first which
+    files have to be read, since that takes a while the first time."""
+    hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
+    todo = [p for _, p in model_paths(nodes) if p is not None and hashes.cached(p.stat()) is None]
+    if todo:
+        size = sum(p.stat().st_size for p in todo) / 1e9
+        print(f"hashing {len(todo)} model file(s), {size:.1f} GB, for the recipe; once, while the job runs")
+    return Background(model_files, nodes, hashes)
+
+
+class Background:
+    """A call running in a daemon thread: Ctrl-C or an error ends the script without waiting for it."""
+
+    def __init__(self, fn, *args) -> None:
+        import threading
+
+        self.done = threading.Event()
+        self.value, self.error = None, None
+        threading.Thread(target=self.run, args=(fn, *args), daemon=True).start()
+
+    def run(self, fn, *args) -> None:
+        try:
+            self.value = fn(*args)
+        except Exception as e:  # handed to whoever waits for the result
+            self.error = e
+        finally:
+            self.done.set()
+
+    def result(self):
+        self.done.wait()
+        if self.error is not None:
+            raise self.error
+        return self.value
 
 
 def decoder_versions() -> dict:
@@ -626,6 +717,15 @@ def decoder_versions() -> dict:
     return out
 
 
+def models(a: argparse.Namespace) -> list[dict]:
+    """The model files of this run, waiting for their hashes if they are still being computed."""
+    if isinstance(a.models, Background):
+        if not a.models.done.is_set():
+            print("  waiting for the model files' hashes")
+        return a.models.result()
+    return a.models
+
+
 def recipe(a: argparse.Namespace, job: Job, flags: list[str], enhanced: str) -> dict:
     """The made field of a result's meta.json in rope."""
     inputs = [{k: v for k, v in (("id", i.get("id")), ("uploaded", i.get("uploaded")), ("upload", name)) if v}
@@ -633,7 +733,7 @@ def recipe(a: argparse.Namespace, job: Job, flags: list[str], enhanced: str) -> 
     made = {"by": "img2img.py", "at": iso(a.when), "flags": flags, "prompt": a.prompt, "inputs": inputs,
             "enhanced_prompt": enhanced or None,
             "batch": {"index": job.index, "count": a.count, "first_seed": job.seed - job.index + 1},
-            "server": a.server_info or None, "env": a.env, "models": a.models, "code": a.code}
+            "server": a.server_info or None, "env": a.env, "models": models(a), "code": a.code}
     return {k: v for k, v in made.items() if v is not None}
 
 
@@ -878,7 +978,8 @@ def run_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
     try:
         for i in range(a.count):
             graph = build(a, names, base + i, system_prompt)
-            a.models = model_files(graph.nodes)
+            if i == 0:
+                a.models = start_model_files(a, graph.nodes)
             jobs[comfy.queue(graph)] = Job(i + 1, base + i, graph)
         print(describe(a, base))
         pending = dict(jobs)
@@ -1101,7 +1202,8 @@ def replay_main(argv: list[str]) -> int:
                 print(f"  {line}")
             if len(diff) > 20:
                 print(f"  ... and {len(diff) - 20} more")
-    for line in model_changes(made.get("models") or [], model_files(a.recorded or {})):
+    hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
+    for line in model_changes(made.get("models") or [], model_files(a.recorded or {}, hashes)):
         print(f"  model: {line}")
     if a.dry_run:
         nodes = replay_graph(a, [i["recorded"] or "" for i in a.inputs], "<system prompt from ComfyUI>")
@@ -1178,6 +1280,8 @@ def graph_diff(old: dict, new: dict) -> list[str]:
 
 
 def model_changes(then: list[dict], now: list[dict]) -> list[str]:
+    """How the model files differ from when an image was made: by content where both sides have a hash, else (an
+    older record) by size and modification time."""
     out = []
     for old in then:
         new = next((m for m in now if m["dir"] == old["dir"] and m["name"] == old["name"]), None)
@@ -1185,8 +1289,11 @@ def model_changes(then: list[dict], now: list[dict]) -> list[str]:
             continue
         if "size" in old and "size" not in new:
             out.append(f"{old['name']} is missing now")
+        elif "sha256" in old and "sha256" in new:
+            if old["sha256"] != new["sha256"]:
+                out.append(f"{old['name']} has other content than then (sha256 {old['sha256'][:12]} -> {new['sha256'][:12]})")
         elif (old.get("size"), old.get("mtime_ns")) != (new.get("size"), new.get("mtime_ns")):
-            out.append(f"{old['name']} is not the same file as then (size or modification time differs)")
+            out.append(f"{old['name']} may not be the same file as then (size or modification time differs)")
     return out
 
 
@@ -1219,7 +1326,7 @@ def replay_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
             print(f"  environment: {line}")
     system_prompt = comfy.enhancer_system_prompt() if a.today.enhance and (a.rebuild or a.recorded is None) else None
     nodes = replay_graph(a, names, system_prompt)
-    a.models = model_files(nodes)
+    a.models = model_files(nodes, ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
     graph = Graph()
     graph.nodes = nodes
     graph.labels = {nid: REPLAY_LABELS[n["class_type"]] for nid, n in nodes.items() if n["class_type"] in REPLAY_LABELS}
