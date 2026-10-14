@@ -143,14 +143,14 @@ The window runs on its own: the command returns at once, and closing the termina
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.
 - The recipe, replays, and sources; a source that no longer exists is marked gone.
 
-**Keys**, when no text field has focus:
+**Keys**, when no text field has focus (Backspace works wherever Delete does: an Apple keyboard's delete key sends it):
 
 | Key | Action |
 |---|---|
 | Arrow keys | Move the selection |
 | Enter, Space | View the selected image large |
 | Ctrl+A | Select all |
-| Delete | Move to the trash (in the trash: delete for good) |
+| Delete, Backspace | Move to the trash (in the trash: delete for good) |
 | Ctrl+C | Copy the path |
 | Esc | Clear the selection |
 | F5 | Reload |
@@ -166,7 +166,7 @@ The window runs on its own: the command returns at once, and closing the termina
 | F | Fit to the window |
 | + − | Zoom in / out |
 | I | Show or hide the details panel |
-| Delete | Move to the trash and go on to the next image (Undo in the status bar) |
+| Delete, Backspace | Move to the trash and go on to the next image (Undo in the status bar) |
 | Ctrl+C | Copy the path |
 | Esc | Back to the grid |
 
@@ -237,7 +237,7 @@ Copy repro and `rope repro ID` both give `img2img.py --replay ID`. Each image's 
 
 ## Deleting
 
-1. **Delete moves an image to the trash.** The Delete button, the Delete key and `rope rm` all do only that; undo it with Undo or `rope restore`.
+1. **Delete moves an image to the trash.** The Delete button, the Delete or Backspace key and `rope rm` all do only that; undo it with Undo or `rope restore`.
 2. **Emptying the trash deletes for good:** `rope purge --trash`, or Delete for good… on the GUI's trash page.
    - An image that other images were made from keeps only its file (and `uploaded/`). Its name, sources, recipe, note, folder and tags go, but the images made from it can still be replayed.
    - It goes for good when the last image made from it is purged.

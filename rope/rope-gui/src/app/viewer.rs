@@ -176,7 +176,8 @@ impl App {
             if k(egui::Key::I) {
                 actions.push(Action::ToggleInfo);
             }
-            if k(egui::Key::Delete) {
+            // Backspace too: what an Apple keyboard labels delete sends Backspace
+            if k(egui::Key::Delete) || k(egui::Key::Backspace) {
                 if self.view == View::Trash {
                     let id = self.viewer.as_ref().map(|v| v.id.clone()).unwrap_or_default();
                     actions.push(Action::Dialog(Dialog::Purge { ids: vec![id] }));

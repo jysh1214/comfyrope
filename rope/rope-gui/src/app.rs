@@ -1293,7 +1293,8 @@ impl App {
                 0
             };
             (
-                i.key_pressed(egui::Key::Delete),
+                // Backspace too: what an Apple keyboard labels delete sends Backspace
+                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
                 i.modifiers.command && i.key_pressed(egui::Key::A),
                 i.key_pressed(egui::Key::Escape),
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
@@ -1590,10 +1591,20 @@ mod tests {
         assert_eq!(app.viewer.as_ref().unwrap().id, order[1]);
         frames_until(&ctx, &mut app, |a| a.visible.len() == 2);
 
+        // Backspace does the same, for keyboards whose delete key sends it (Apple's)
+        press(&ctx, &mut app, egui::Key::Backspace);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&order[1]));
+        assert_eq!(app.viewer.as_ref().unwrap().id, order[2]);
+        frames_until(&ctx, &mut app, |a| a.visible.len() == 1);
+
         // Esc goes back to the grid, on the image last looked at
         press(&ctx, &mut app, egui::Key::Escape);
         assert!(app.viewer.is_none());
-        assert_eq!(app.selected, [order[1].clone()]);
+        assert_eq!(app.selected, [order[2].clone()]);
+
+        // in the grid, Backspace trashes the selection
+        press(&ctx, &mut app, egui::Key::Backspace);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&order[2]));
         let _ = (a, b, c);
     }
 
