@@ -1701,6 +1701,24 @@ mod tests {
         panic!("the window never got there");
     }
 
+    /// Clicks at `at`: a press and a release, each in its own frame.
+    fn click(ctx: &egui::Context, app: &mut App, at: egui::Pos2) {
+        for pressed in [true, false] {
+            let event = egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                events: vec![egui::Event::PointerMoved(at), event],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.frame(ctx));
+        }
+    }
+
     /// Presses the mouse at `from`, moves it to `to` and lets go, over four frames.
     fn drag(ctx: &egui::Context, app: &mut App, from: egui::Pos2, to: egui::Pos2) {
         let button = |pos, pressed| egui::Event::PointerButton {
@@ -2053,7 +2071,18 @@ mod tests {
         let order: Vec<&str> = app.model().prompts.prompts.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(order, ["Third", "result", "Night"]);
         assert!(app.prompt_drag.is_none());
+        // a click on a card opens it in the editor; the Copy button inside the card is reached on its own
+        app.prompt = None;
+        let corner = rect(&app, &other.id).min + Vec2::new(10.0, 2.0);
+        click(&ctx, &mut app, corner);
+        assert_eq!(app.prompt.as_ref().map(|e| e.id.as_str()), Some(other.id.as_str()));
+        app.prompt = None;
+        let copy = rect(&app, &other.id);
+        click(&ctx, &mut app, egui::pos2(copy.max.x - 18.0, copy.min.y + 14.0));
+        assert!(app.prompt.is_none(), "the Copy button took the click, not the card");
+        assert!(app.status.as_ref().is_some_and(|(s, _, _)| s.contains("copied")), "{:?}", app.status);
         app.delete_prompt(&third.id).unwrap();
+        app.edit_prompt(&saved.id);
         app.search = "night".into();
         assert_eq!(app.prompts_shown().len(), 1);
         app.search.clear();

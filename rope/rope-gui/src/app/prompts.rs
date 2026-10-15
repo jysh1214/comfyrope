@@ -156,29 +156,33 @@ impl App {
                 } else {
                     ui.visuals().faint_bg_color
                 };
-                let resp = egui::Frame::group(ui.style())
-                    .fill(fill)
-                    .show(ui, |ui| {
-                        if lifted {
-                            ui.set_opacity(0.4);
-                        }
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&p.title).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Copy").on_hover_text("copy the text").clicked() {
-                                    actions.push(Action::CopyText(p.text.clone()));
-                                }
+                // the card is the widget, registered before what is in it, so that its Copy button stays on top
+                // and gets its own clicks; the labels are not selectable, so a drag on the text drags the card
+                let card = egui::UiBuilder::new().id_salt(&p.id).sense(Sense::click_and_drag());
+                let resp = ui
+                    .scope_builder(card, |ui| {
+                        egui::Frame::group(ui.style()).fill(fill).show(ui, |ui| {
+                            if lifted {
+                                ui.set_opacity(0.4);
+                            }
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(RichText::new(&p.title).strong()).selectable(false));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("Copy").on_hover_text("copy the text").clicked() {
+                                        actions.push(Action::CopyText(p.text.clone()));
+                                    }
+                                });
                             });
+                            let text = if p.text.is_empty() {
+                                RichText::new("no text yet").weak().small()
+                            } else {
+                                RichText::new(&p.text).small()
+                            };
+                            ui.add(egui::Label::new(text).wrap().selectable(false));
                         });
-                        if p.text.is_empty() {
-                            ui.label(RichText::new("no text yet").weak().small());
-                        } else {
-                            ui.add(egui::Label::new(RichText::new(&p.text).small()).wrap());
-                        }
                     })
-                    .response
-                    .interact(Sense::click_and_drag());
+                    .response;
                 if resp.clicked() {
                     actions.push(Action::EditPrompt(p.id.clone()));
                 }
