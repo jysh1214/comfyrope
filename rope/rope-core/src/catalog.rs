@@ -418,7 +418,7 @@ fn check_tag(tag: &str) -> Result<&str> {
 }
 
 /// 8 lowercase base32 characters from the kernel's random source.
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut bytes = [0u8; 8];
     if let Ok(mut f) = fs::File::open("/dev/urandom") {

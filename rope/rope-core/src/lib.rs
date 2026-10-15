@@ -6,6 +6,7 @@
 //! ```text
 //! rope.json            marks the root: {"format": 1, "created": ...}
 //! catalog.json         folders, the folder of each image, tags, the trash
+//! prompts.json         prompts kept to use again, each with a title
 //! journal.jsonl        one line per change, only ever appended; the GUI follows it
 //! REPO                 where the img2img repo was last seen, for repro.sh
 //! .lock                flock held around every metadata change
@@ -25,6 +26,7 @@ pub mod journal;
 pub mod library;
 pub mod lineage;
 pub mod meta;
+pub mod prompts;
 pub mod purge;
 pub mod repro;
 pub mod runs;

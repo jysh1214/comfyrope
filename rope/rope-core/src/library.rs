@@ -120,6 +120,10 @@ impl Library {
         self.root.join("catalog.json")
     }
 
+    pub fn prompts_path(&self) -> PathBuf {
+        self.root.join("prompts.json")
+    }
+
     pub fn journal_path(&self) -> PathBuf {
         self.root.join("journal.jsonl")
     }

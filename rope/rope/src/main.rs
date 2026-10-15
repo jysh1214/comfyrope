@@ -6,7 +6,7 @@ use rope_core::catalog::Catalog;
 use rope_core::hash::short;
 use rope_core::lineage::Lineage;
 use rope_core::store::{self, NewImage};
-use rope_core::{Library, Meta, check, journal, purge, repro, time};
+use rope_core::{Library, Meta, check, journal, prompts, purge, repro, time};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -25,6 +25,8 @@ Examples:
   rope mv @3fa9c1 @9b2e0f portraits # images into a folder; / is unfiled
   rope mv trips/kyoto travel/京都   # rename or move a folder
   rope rm @3fa9c1 && rope purge --trash
+  rope prompt add 黃昏海邊 \"把背景換成黃昏的海邊\"
+  ./img2img.py photo.jpg \"$(rope prompt show 黃昏海邊)\"
 
 An image is named by at least 6 hex digits of its id (with or without @), or by a file with the same bytes.
 Folders exist only in rope; they are paths like trips/kyoto, and / is the top, where unfiled images are.";
@@ -190,6 +192,9 @@ enum Cmd {
     Tag(TagCmd),
     /// Every tag, with how many images have it
     Tags,
+    /// Keep prompts to use again, each with a title: add, ls, show, edit, rm
+    #[command(subcommand)]
+    Prompt(PromptCmd),
     /// Mark images as favorites, which rope-gui shows first; --off unmarks them
     Fav {
         #[arg(required = true)]
@@ -268,6 +273,34 @@ enum TagCmd {
     },
     /// Rename a tag on every image
     Rename { old: String, new: String },
+}
+
+#[derive(Subcommand)]
+enum PromptCmd {
+    /// Add a prompt: TEXT, or the prompt an image was made with (--from ID), or standard input
+    Add {
+        title: String,
+        text: Option<String>,
+        /// Take the text from this image's recipe
+        #[arg(long, value_name = "ID", conflicts_with = "text")]
+        from: Option<String>,
+    },
+    /// Every prompt: id, title and the first line of its text
+    Ls,
+    /// Print the text of a prompt, named by its title or id; "$(rope prompt show TITLE)" puts it in a command
+    Show { name: String },
+    /// Change a prompt's title or text; -e edits the text in $EDITOR
+    Edit {
+        name: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(short, long)]
+        edit: bool,
+    },
+    /// Remove a prompt
+    Rm { name: String },
 }
 
 fn main() {
@@ -355,6 +388,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Name { id, name } => store::set_name(&lib, &store::resolve(&lib, &id)?, &name),
         Cmd::Note { id, set, append, edit } => note(&lib, json, &id, set, append, edit),
         Cmd::Tag(t) => tag(&lib, t),
+        Cmd::Prompt(p) => prompt(&lib, json, p),
         Cmd::Tags => {
             let tags = Catalog::load(&lib)?.tags();
             emit(json, json!(tags), || {
@@ -828,23 +862,86 @@ fn note(lib: &Library, json: bool, id: &str, set: Option<String>, append: Option
     }
     if edit {
         let old = store::note(lib, &sha)?;
-        let tmp = lib.tmp_dir().join(format!("note-{}.txt", short(&sha)));
-        std::fs::write(&tmp, &old)?;
-        let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
-        let status =
-            std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&tmp).status()?;
-        let new = std::fs::read_to_string(&tmp)?;
-        let _ = std::fs::remove_file(&tmp);
-        if !status.success() {
-            bail!("{editor} failed; the note is unchanged");
-        }
-        if new != old {
+        if let Some(new) = in_editor(lib, &format!("note-{}", short(&sha)), &old)? {
             store::set_note(lib, &sha, &new)?;
         }
         return Ok(());
     }
     let text = store::note(lib, &sha)?;
     emit(json, json!({"note": text}), || print!("{text}"))
+}
+
+/// Opens `old` in $VISUAL or $EDITOR and returns what came back, or None when it is unchanged.
+fn in_editor(lib: &Library, stem: &str, old: &str) -> Result<Option<String>> {
+    let tmp = lib.tmp_dir().join(format!("{stem}.txt"));
+    std::fs::write(&tmp, old)?;
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let status =
+        std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&tmp).status()?;
+    let new = std::fs::read_to_string(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    if !status.success() {
+        bail!("{editor} failed; nothing changed");
+    }
+    Ok((new != old).then_some(new))
+}
+
+fn prompt(lib: &Library, json: bool, cmd: PromptCmd) -> Result<()> {
+    let prompt_json = |p: &prompts::Prompt| json!(p);
+    match cmd {
+        PromptCmd::Add { title, text, from } => {
+            let text = match (text, from) {
+                (Some(t), _) => t,
+                (None, Some(id)) => {
+                    let sha = store::resolve(lib, &id)?;
+                    let meta = store::load(lib, &sha)?;
+                    meta.made_str("prompt")
+                        .map(str::to_owned)
+                        .with_context(|| format!("{} has no recipe, so no prompt", short(&sha)))?
+                }
+                (None, None) => {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t)?;
+                    t
+                }
+            };
+            let p = prompts::add(lib, &title, &text)?;
+            emit(json, prompt_json(&p), || println!("{}  {}", p.id, p.title))
+        }
+        PromptCmd::Ls => {
+            let ps = prompts::Prompts::load(lib)?;
+            emit(json, json!(ps.prompts), || {
+                for p in &ps.prompts {
+                    let first = p.text.lines().next().unwrap_or("");
+                    let more = if p.text.lines().count() > 1 { " …" } else { "" };
+                    println!("{}  {}\n          {first}{more}", p.id, p.title);
+                }
+            })
+        }
+        PromptCmd::Show { name } => {
+            let ps = prompts::Prompts::load(lib)?;
+            let p = ps.find(&name)?;
+            emit(json, prompt_json(p), || println!("{}", p.text))
+        }
+        PromptCmd::Edit { name, title, text, edit } => {
+            let id = prompts::Prompts::load(lib)?.find(&name)?.id.clone();
+            let mut text = text;
+            if edit {
+                let old = prompts::Prompts::load(lib)?.find(&id)?.text.clone();
+                text = in_editor(lib, &format!("prompt-{id}"), &old)?;
+            }
+            if title.is_none() && text.is_none() {
+                bail!("nothing to change: pass --title, --text or -e");
+            }
+            let p = prompts::edit(lib, &id, title.as_deref(), text.as_deref())?;
+            emit(json, prompt_json(&p), || println!("{}  {}", p.id, p.title))
+        }
+        PromptCmd::Rm { name } => {
+            let id = prompts::Prompts::load(lib)?.find(&name)?.id.clone();
+            let p = prompts::remove(lib, &id)?;
+            emit(json, prompt_json(&p), || println!("removed {}  {}", p.id, p.title))
+        }
+    }
 }
 
 fn tag(lib: &Library, cmd: TagCmd) -> Result<()> {

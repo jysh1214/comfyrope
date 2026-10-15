@@ -64,6 +64,7 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 ~/.local/share/rope/
 ├── rope.json            # marks the library root
 ├── catalog.json         # the folder tree, each image's folder, tags, the trash
+├── prompts.json         # prompts kept to use again, each with a title
 ├── journal.jsonl        # one line per change, only ever appended; the GUI follows it
 ├── REPO                 # where the img2img repo was last seen, for repro.sh
 ├── envs/<id>.json       # environment snapshots, shared by every image made in the same environment
@@ -107,6 +108,7 @@ An image's id is the SHA-256 of its file:
 | `rope note ID [--set T \| --append T \| -e]` | Print or change the note; `-e` edits it in `$EDITOR` |
 | `rope tag add\|rm T ID...`, `rope tag rename OLD NEW`, `rope tags` | Manage tags |
 | `rope fav ID... [--off]` | Mark images as favorites, or unmark them; rope-gui shows favorites first |
+| `rope prompt add TITLE [TEXT \| --from ID]`, `rope prompt ls`, `rope prompt show NAME`, `rope prompt edit NAME [--title T] [--text T] [-e]`, `rope prompt rm NAME` | Keep prompts to use again. `show` prints the text, so `"$(rope prompt show 黃昏海邊)"` puts it in a command; `--from` takes the prompt an image was made with; NAME is a title or an id |
 | `rope lineage ID [--up \| --down]` | The tree of images above or below |
 | `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full `img2img.py` command, to change and run as a variation |
 | `rope rm ID...`, `rope restore ID...` | Move images to the trash, or back out |
@@ -127,7 +129,7 @@ The window runs on its own: the command returns at once, and closing the termina
 
 **Left:**
 
-- All, Unfiled, and rope's own folder tree, with image counts.
+- Prompts, the page of prompts kept to use again (below); then All, Unfiled, and rope's own folder tree, with image counts.
 - Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it, or delete it with everything in it (its images move to the trash; it says how many first); `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
 - Below the tree: the tags, then the trash. Right-click the trash and choose Clean to empty it; it asks first, since that deletes for good.
 
@@ -145,6 +147,8 @@ The window runs on its own: the command returns at once, and closing the termina
 - Its folder, tags and note.
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.
 - The recipe, replays, and sources; a source that no longer exists is marked gone.
+
+**Prompts**, chosen on the left: prompts worth keeping, each with a title. The list is in the middle; click one to edit it on the right, where Save writes it, Copy puts its text on the clipboard and Delete… removes it. New prompt starts one, and Save prompt under an image's recipe keeps that image's prompt under the image's name. The search box filters them. On this page Delete, Ctrl+C and Esc act on the prompt being edited. `rope prompt` reaches the same list from the terminal.
 
 **Keys**, when no text field has focus (Backspace works wherever Delete does: an Apple keyboard's delete key sends it):
 
@@ -195,6 +199,7 @@ The window runs on its own: the command returns at once, and closing the termina
 #   new rope folder trips/京都
 #   -> 3fa9c1e27b0d  trips/京都  1024x1024, 4.1s
 ./img2img.py @3fa9c1 "把天空換成星空" --into trips/京都     # edit a result further; its upstream is recorded
+./img2img.py @3fa9c1 "$(rope prompt show 星空)"             # a prompt kept with rope prompt add, or on the GUI's Prompts page
 ./img2img.py --replay 3fa9c1                                # make it again and compare the pixels
 ```
 

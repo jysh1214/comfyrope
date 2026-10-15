@@ -2,6 +2,7 @@
 //! library by reading the journal, which every writer appends to.
 
 use anyhow::Result;
+use rope_core::prompts::Prompts;
 use rope_core::store::RAW_SUFFIXES;
 use rope_core::{Catalog, Library, Meta, journal, store};
 use serde_json::Value;
@@ -15,6 +16,8 @@ pub enum View {
     Folder(String),
     Tag(String),
     Trash,
+    /// The Prompts page: not images at all.
+    Prompts,
 }
 
 /// The part of an image's meta.json the grid and the lineage need; the details panel reads the whole file.
@@ -63,6 +66,7 @@ impl Item {
 pub struct Model {
     pub items: HashMap<String, Item>,
     pub catalog: Catalog,
+    pub prompts: Prompts,
     pub children: HashMap<String, Vec<String>>,
     /// Goes up with every change, so views know to recompute.
     pub version: u64,
@@ -85,6 +89,7 @@ impl Model {
         let mut model = Model {
             items,
             catalog: Catalog::load(lib)?,
+            prompts: Prompts::load(lib)?,
             children: HashMap::new(),
             version: 1,
             offset,
@@ -121,6 +126,7 @@ impl Model {
             }
         }
         self.catalog = Catalog::load(lib)?;
+        self.prompts = Prompts::load(lib)?;
         self.link();
         self.version += 1;
         Ok(changed)
@@ -165,6 +171,7 @@ impl Model {
                     View::Folder(id) => self.shown(i) && e.is_some_and(|e| e.folder.as_ref() == Some(id)),
                     View::Tag(t) => self.shown(i) && e.is_some_and(|e| e.tags.contains(t)),
                     View::Trash => !i.kept && self.catalog.is_trashed(&i.id),
+                    View::Prompts => false,
                 };
                 in_view && (search.is_empty() || i.haystack.contains(&search))
             })

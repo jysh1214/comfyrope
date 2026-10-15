@@ -2,6 +2,7 @@
 //! on the right. Everything it changes goes through rope-core, like the CLI, so both can be used at once; it sees
 //! changes made elsewhere through the journal.
 
+mod prompts;
 mod viewer;
 
 use crate::model::{Model, View};
@@ -45,6 +46,7 @@ enum Dialog {
     DeleteFolder { id: String },
     Purge { ids: Vec<String> },
     Tag { ids: Vec<String>, name: String },
+    DeletePrompt { id: String },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -93,6 +95,16 @@ enum Action {
     ToggleInfo,
     /// Mark these images as favorites, or, when all of them are already, unmark them.
     ToggleFavorite(Vec<String>),
+    /// Edit the prompt with this id on the Prompts page, or start a new one.
+    EditPrompt(Option<String>),
+    /// Start a new prompt with this title and text, on the Prompts page.
+    DraftPrompt {
+        title: String,
+        text: String,
+    },
+    SavePrompt,
+    ClosePrompt,
+    CopyText(String),
 }
 
 pub struct App {
@@ -118,6 +130,8 @@ pub struct App {
     open_on_load: Option<String>,
     /// Looking at one image as large as the window allows.
     viewer: Option<viewer::Viewer>,
+    /// The prompt open in the editor of the Prompts page.
+    prompt: Option<prompts::PromptEdit>,
 }
 
 impl App {
@@ -165,6 +179,7 @@ impl App {
             scroll_to: None,
             open_on_load: open,
             viewer: None,
+            prompt: None,
         };
         match watcher {
             Ok(w) => app._watcher = Some(w),
@@ -240,6 +255,7 @@ impl App {
                         self.load_detail(&id);
                     }
                 }
+                self.follow_prompts();
             }
             Err(e) => self.say(format!("cannot read the journal: {e:#}"), true),
         }
@@ -303,6 +319,18 @@ impl App {
                     self.anchor = None;
                 }
             }
+            Action::EditPrompt(id) => self.edit_prompt(id, String::new(), String::new()),
+            Action::DraftPrompt { title, text } => {
+                if self.view != View::Prompts {
+                    self.view = View::Prompts;
+                    self.selected.clear();
+                    self.anchor = None;
+                }
+                self.edit_prompt(None, title, text);
+            }
+            Action::SavePrompt => self.save_prompt()?,
+            Action::ClosePrompt => self.prompt = None,
+            Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
             Action::Select(id, pick) => {
                 match pick {
                     Pick::One => self.selected = vec![id.clone()],
@@ -580,6 +608,8 @@ impl App {
             }
         };
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            row(ui, View::Prompts, format!("Prompts  ({})", model.prompts.prompts.len()), actions);
+            ui.add_space(8.0);
             row(ui, View::All, format!("All  ({})", model.shown), actions);
             row(ui, View::Unfiled, format!("Unfiled  ({})", counts.get(&None).copied().unwrap_or(0)), actions);
             ui.add_space(8.0);
@@ -721,6 +751,9 @@ impl App {
     }
 
     fn grid(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.view == View::Prompts {
+            return self.prompt_list(ui, actions);
+        }
         let n = self.visible.len();
         if n == 0 {
             ui.centered_and_justified(|ui| {
@@ -889,6 +922,9 @@ impl App {
     }
 
     fn details(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.view == View::Prompts {
+            return self.prompt_editor(ui, actions);
+        }
         if self.selected.len() > 1 {
             return self.bulk(ui, actions);
         }
@@ -1098,6 +1134,12 @@ impl App {
             ui.label(RichText::new(repro::shell_join(&m.flags())).monospace().small());
             if let Some(p) = made.get("prompt").and_then(|v| v.as_str()) {
                 ui.add(egui::Label::new(p).wrap());
+                let save = ui
+                    .small_button("Save prompt")
+                    .on_hover_text("keep it on the Prompts page, under this image's name");
+                if save.clicked() {
+                    actions.push(Action::DraftPrompt { title: d.name.clone(), text: p.to_owned() });
+                }
             }
             if let Some(p) = made.get("enhanced_prompt").and_then(|v| v.as_str()).filter(|p| !p.is_empty()) {
                 ui.label(RichText::new("enhanced prompt").weak().small());
@@ -1233,6 +1275,15 @@ impl App {
                         }));
                     }
                 }
+                Dialog::DeletePrompt { id } => {
+                    let title = model.prompts.get(id).map(|p| p.title.clone()).unwrap_or_default();
+                    ui.heading("Delete prompt");
+                    ui.label(format!("Remove the prompt {title:?}? There is no undo for this."));
+                    let id = id.clone();
+                    if buttons(ui, "Delete", enter, &mut done) {
+                        run = Some(Box::new(move |app| app.delete_prompt(&id)));
+                    }
+                }
                 Dialog::DeleteFolder { id } => {
                     let path = model.catalog.folder_path(id);
                     let (folders, images) = model.catalog.tree_size(id);
@@ -1321,6 +1372,28 @@ impl App {
         if self.dialog.is_some() || ctx.wants_keyboard_input() {
             return;
         }
+        if self.view == View::Prompts {
+            // on the Prompts page the keys act on the prompt in the editor
+            let (del, esc, copy) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                    i.key_pressed(egui::Key::Escape),
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                )
+            });
+            if let Some(e) = &self.prompt {
+                if copy {
+                    actions.push(Action::CopyText(e.text.clone()));
+                }
+                if del && let Some(id) = &e.id {
+                    actions.push(Action::Dialog(Dialog::DeletePrompt { id: id.clone() }));
+                }
+                if esc {
+                    actions.push(Action::ClosePrompt);
+                }
+            }
+            return;
+        }
         let (del, all, esc, copy, f5, arrows) = ctx.input(|i| {
             let dir = if i.key_pressed(egui::Key::ArrowRight) {
                 1
@@ -1398,6 +1471,7 @@ impl App {
             View::Folder(f) => model.catalog.folder_path(f),
             View::Tag(t) => format!("#{t}"),
             View::Trash => "Trash".into(),
+            View::Prompts => "Prompts".into(),
         }
     }
 }
@@ -1483,7 +1557,11 @@ impl App {
                 );
                 ui.separator();
                 ui.label(RichText::new(self.title()).strong());
-                ui.label(RichText::new(format!("{} image(s)", self.visible.len())).weak());
+                let count = match self.view {
+                    View::Prompts => format!("{} prompt(s)", self.prompts_shown().len()),
+                    _ => format!("{} image(s)", self.visible.len()),
+                };
+                ui.label(RichText::new(count).weak());
             });
         });
         egui::SidePanel::left("folders")
@@ -1908,5 +1986,33 @@ mod tests {
         app.apply(Action::SelectAll, Some(&ctx));
         frames_until(&ctx, &mut app, |_| true);
         assert_eq!(app.selected.len(), 5);
+
+        // the Prompts page: a prompt kept from an image's recipe, one added by the CLI, an edit and a delete
+        app.apply(Action::DraftPrompt { title: "result".into(), text: "把背景換成海邊".into() }, Some(&ctx));
+        assert_eq!(app.view, View::Prompts);
+        frames_until(&ctx, &mut app, |_| true); // draws the list and the editor
+        app.apply(Action::SavePrompt, Some(&ctx));
+        let ps = rope_core::prompts::Prompts::load(&lib).unwrap();
+        let saved = ps.prompts[0].clone();
+        assert_eq!((ps.prompts.len(), saved.title.as_str(), saved.text.as_str()), (1, "result", "把背景換成海邊"));
+        assert_eq!(app.prompt.as_ref().unwrap().id.as_deref(), Some(saved.id.as_str()));
+        let other = rope_core::prompts::add(&lib, "Night", "星空").unwrap();
+        frames_until(&ctx, &mut app, |a| a.model().prompts.prompts.len() == 2);
+        app.search = "night".into();
+        assert_eq!(app.prompts_shown().len(), 1);
+        app.search.clear();
+        app.prompt.as_mut().unwrap().text = "把背景換成黃昏的海邊".into();
+        app.apply(Action::SavePrompt, Some(&ctx));
+        let text = rope_core::prompts::Prompts::load(&lib).unwrap().get(&saved.id).unwrap().text.clone();
+        assert_eq!(text, "把背景換成黃昏的海邊");
+        rope_core::prompts::edit(&lib, &saved.id, Some("Sunset sea"), None).unwrap();
+        frames_until(&ctx, &mut app, |a| a.prompt.as_ref().is_some_and(|e| e.title == "Sunset sea"));
+        app.dialog = Some(Dialog::DeletePrompt { id: other.id.clone() });
+        frames_until(&ctx, &mut app, |_| true);
+        app.dialog = None;
+        app.delete_prompt(&other.id).unwrap();
+        assert_eq!(app.model().prompts.prompts.len(), 1);
+        app.delete_prompt(&saved.id).unwrap();
+        assert!(app.prompt.is_none(), "deleting the prompt in the editor closes it");
     }
 }
