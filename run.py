@@ -16,7 +16,7 @@ import img2img
 #    differ only by the settings being compared.
 BASE = img2img.Request(
     images=["photo.jpg"],
-    prompt="make the subjects skin details more prominent and natural",
+    prompt="",  # the edit, for every combination; a LoRA's trigger (TRIGGERS) is added where the LoRA is in
     count=1,  # images per combination, one seed each from `seed`
     seed=42,
     into="tests/skin",  # the prefix of the rope folders: into_model_loras, see folder()
@@ -31,6 +31,9 @@ LORAS = {  # model -> its LoRAs, name[:strength] as on the command line (.safete
     "2.1": [],
 }
 LIGHTNING = ["4", "8"]  # 2511 only
+TRIGGERS = {  # LoRA (as in LORAS, without the strength) -> the prompt its author asks for; added for that LoRA
+    "qwen-edit-skin-1.1": "Make the subjects skin details more prominent and natural.",
+}
 
 # The ComfyUI options, as run() takes them: server, keep_server, no_start, comfy_args, timeout, fresh, library.
 OPTIONS = {"fresh": False}
@@ -50,12 +53,18 @@ def folder(model: str, loras: tuple[str, ...]) -> str:
     return "_".join(bits)
 
 
+def prompt(loras: tuple[str, ...]) -> str:
+    """BASE.prompt followed by the triggers of the LoRAs in `loras`."""
+    return " ".join(p for p in [BASE.prompt, *(TRIGGERS.get(l.split(":")[0], "") for l in loras)] if p)
+
+
 def batch():
     """The requests, one per combination, each BASE with the combination's fields changed."""
     # 3. The grid.
     for model, loras_of_model in LORAS.items():
         for lightning, loras in itertools.product(LIGHTNING if model == "2511" else [None], choices(loras_of_model)):
-            yield dataclasses.replace(BASE, model=model, lightning=lightning, lora=list(loras), into=folder(model, loras))
+            yield dataclasses.replace(BASE, prompt=prompt(loras), model=model, lightning=lightning, lora=list(loras),
+                                      into=folder(model, loras))
 
 
 def main() -> None:
@@ -65,7 +74,7 @@ def main() -> None:
             setting = f"lightning {r.lightning}" if r.model == "2511" else f"resolution {r.resolution}"
             loras = ", ".join(f"{name}:{strength:g}" for name, strength in r.lora) or "none"
             print(f"#{n} {r.into}: model {r.model}, {setting}, {r.steps} steps, cfg {r.cfg:g}, seed {r.seed}, "
-                  f"LoRA {loras}")
+                  f"LoRA {loras}; prompt {r.prompt!r}")
         folders = dict.fromkeys(r.into for r in requests)
         print(f"{len(requests)} requests, {sum(r.count for r in requests)} images, {len(folders)} folders")
         return
