@@ -102,6 +102,20 @@ fn folder_tags_and_note_are_attached_on_the_way_in_and_inputs_follow_their_resul
 }
 
 #[test]
+fn ensure_folder_makes_a_missing_folder_once_and_leaves_the_top_alone() {
+    let (_dir, lib) = library();
+    let (id, created) = store::ensure_folder(&lib, "trips/kyoto").unwrap();
+    let id = id.expect("a folder, not the top");
+    assert!(created);
+    assert_eq!(store::ensure_folder(&lib, "trips/kyoto").unwrap(), (Some(id.clone()), false));
+    assert_eq!(store::ensure_folder(&lib, "/").unwrap(), (None, false));
+    let c = Catalog::load(&lib).unwrap();
+    assert_eq!(c.folder_path(&id), "trips/kyoto");
+    assert_eq!(c.find("trips"), Some(Some(c.folders[&id].parent.clone().unwrap())));
+    assert_eq!(fs::read_to_string(lib.journal_path()).unwrap().matches("mkdir").count(), 1);
+}
+
+#[test]
 fn bringing_in_a_trashed_image_takes_it_out_of_the_trash() {
     let (dir, lib) = library();
     let p = png(dir.path(), "a.png", 1);

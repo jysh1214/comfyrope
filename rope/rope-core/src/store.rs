@@ -485,6 +485,20 @@ pub fn add_replay(lib: &Library, sha: &str, record: Value) -> Result<()> {
     journal::append(lib, "replay", &[sha.to_owned()])
 }
 
+/// The folder at `path`, made with its missing parents when there is none: what `--into` means. Returns the
+/// folder (`None` for the top) and whether anything was made. An existing folder costs no write.
+pub fn ensure_folder(lib: &Library, path: &str) -> Result<(Option<String>, bool)> {
+    let _lock = lib.lock()?;
+    let mut catalog = Catalog::load(lib)?;
+    if let Some(id) = catalog.find(path) {
+        return Ok((id, false));
+    }
+    let id = catalog.mkdir(path, true)?;
+    catalog.save(lib)?;
+    journal::append(lib, "mkdir", &[])?;
+    Ok((Some(id), true))
+}
+
 /// Changes the catalog under the library lock and journals it as `op` on `ids`.
 pub fn edit_catalog<T>(
     lib: &Library,

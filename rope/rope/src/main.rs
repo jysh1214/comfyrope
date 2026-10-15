@@ -57,7 +57,7 @@ enum Cmd {
     Import {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Put them in this folder (it must exist; see mkdir)
+        /// Put them in this folder, made if there is none
         #[arg(long, value_name = "FOLDER")]
         into: Option<String>,
         /// Add this tag; repeatable
@@ -325,9 +325,14 @@ fn run(cli: Cli) -> Result<()> {
             set_repo(&lib, repo.as_deref())?;
             replayed(&lib, json, &id, &file, &made, graph.as_deref())
         }
-        Cmd::Mkdir { parents, path } => {
-            let id = store::edit_catalog(&lib, "mkdir", &[], |c| c.mkdir(&path, parents))?;
-            emit(json, json!({"folder": id}), || {})
+        Cmd::Mkdir { parents: false, path } => {
+            let id = store::edit_catalog(&lib, "mkdir", &[], |c| c.mkdir(&path, false))?;
+            emit(json, json!({"folder": id, "created": true}), || {})
+        }
+        Cmd::Mkdir { parents: true, path } => {
+            let (id, created) = store::ensure_folder(&lib, &path)?;
+            let id = id.context("a folder needs a name")?;
+            emit(json, json!({"folder": id, "created": created}), || {})
         }
         Cmd::Mv { args } => mv(&lib, &args),
         Cmd::Rmdir { path, recursive: false } => store::edit_catalog(&lib, "rmdir", &[], |c| c.rmdir(&path)),
@@ -961,9 +966,9 @@ fn summary_json(lib: &Library, catalog: &Catalog, m: &Meta) -> Value {
            "favorite": e.favorite})
 }
 
-/// `--into FOLDER` as the folder to file into: `None` without the flag.
+/// `--into FOLDER` as the folder to file into, made if there is none: `None` without the flag.
 fn into_folder(lib: &Library, into: Option<&str>) -> Result<Option<Option<String>>> {
-    into.map(|f| Catalog::load(lib)?.resolve(f)).transpose()
+    into.map(|f| store::ensure_folder(lib, f).map(|(id, _)| id)).transpose()
 }
 
 fn resolve_all(lib: &Library, ids: &[String]) -> Result<Vec<String>> {

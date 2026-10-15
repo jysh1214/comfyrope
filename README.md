@@ -238,8 +238,7 @@ Images come first and the prompt last; the first image sets the output size. Wit
 Results go into the rope library (`~/.local/share/rope`), so build rope first; without it, `img2img.py` stops before doing anything. Organize the results with rope folders and tags, and browse them with `rope-gui`:
 
 ```bash
-rope/target/release/rope mkdir -p trips/京都
-./img2img.py photo.jpg "把背景換成黃昏的海邊" -n 4 --into trips/京都 --tag 夕陽 --tag 海邊
+./img2img.py photo.jpg "把背景換成黃昏的海邊" -n 4 --into trips/京都 --tag 夕陽 --tag 海邊   # the folder is made if there is none
 ./img2img.py @3fa9c1 "把天空換成星空" --into trips/京都   # an image in rope as the input; its lineage is recorded
 ```
 
@@ -308,7 +307,7 @@ The rope library:
 
 | Option | Description |
 |---|---|
-| `--into FOLDER` | The rope folder for the results. It must exist (`rope mkdir -p`), so a typo fails before any GPU work. Default: `$IMG2IMG_INTO`, else unfiled |
+| `--into FOLDER` | The rope folder for the results, made with its parents if there is none (the script says so, which is how a typo shows). Default: `$IMG2IMG_INTO`, else unfiled |
 | `--tag TAG` | Tag the results. For several tags, repeat it: `--tag 夕陽 --tag 海邊` (a comma does not split) |
 | `--note TEXT` | A note on each result |
 | `@ID` as an input | An image in rope, named by at least 6 hex digits of its id |

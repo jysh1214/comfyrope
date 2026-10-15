@@ -96,7 +96,7 @@ An image's id is the SHA-256 of its file:
 | `rope mv trips/京都 travel/京都` | Rename or move a folder |
 | `rope mv @3fa9c1 @9b2e0f portraits` | Move images into a folder; `/` is unfiled |
 | `rope rmdir [-r] F` | Remove an empty folder; with `-r`, a folder with everything in it: its subfolders go, and its images move to the trash (restored, they come back unfiled) |
-| `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image in a folder recursively, all into F; `--tag` repeats |
+| `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image in a folder recursively, all into F, made if there is none; `--tag` repeats |
 | `rope import --tree DIR... [--into F]` | Make each disk folder a rope folder of the same name, with its subfolders, in F or at the top |
 | `rope ls [F] [-r] [-l] [--tag T] [--fav] [--trash]` | List a folder; without F, the unfiled images. Favorites are marked ★ |
 | `rope tree` | The folder tree with image counts, and every tag |
@@ -190,8 +190,8 @@ The window runs on its own: the command returns at once, and closing the termina
 `img2img.py` writes its results into rope; it does not run without it:
 
 ```bash
-rope mkdir -p trips/京都
 ./img2img.py ~/Pictures/IMG_1234.HEIC "把背景換成黃昏的海邊" -n 4 --into trips/京都 --tag 夕陽 --tag 海邊 --note "first try"
+#   new rope folder trips/京都
 #   -> 3fa9c1e27b0d  trips/京都  1024x1024, 4.1s
 ./img2img.py @3fa9c1 "把天空換成星空" --into trips/京都     # edit a result further; its upstream is recorded
 ./img2img.py --replay 3fa9c1                                # make it again and compare the pixels
@@ -207,11 +207,11 @@ On every run:
    - the rewrite of 2.1's prompt enhancer;
    - the ComfyUI version and commit, package versions, and the GPU;
    - the SHA-256 of every model file and LoRA, and the version of `img2img.py`. A model file is read once for its hash: the result is cached in `.cache/model-sha256.json` by file identity (device, inode, size, modification time), and the hashing runs alongside the GPU work. The first run reads the default 2511 set, about 31 GB.
-4. With `--into`, unfiled inputs go into that folder too.
+4. With `--into`, unfiled inputs go into that folder too. The folder is made before the run if there is none.
 
 | Option | Description |
 |---|---|
-| `--into FOLDER` | The rope folder for the results. It must exist, so a typo fails before any GPU work. Default: `$IMG2IMG_INTO`, else unfiled |
+| `--into FOLDER` | The rope folder for the results, made with its parents if there is none; the script says so, which is how a typo shows. Default: `$IMG2IMG_INTO`, else unfiled |
 | `--tag T`, `--note T` | Tag the results or add a note. For several tags, repeat it: `--tag 夕陽 --tag 海邊` (a comma does not split) |
 | `@ID` | An image in rope as an input |
 

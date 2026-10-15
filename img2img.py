@@ -32,7 +32,7 @@ Results go into the rope image library (rope/, by default in ~/.local/share/rope
 first, and so does every input, so a result can be made again after its inputs are moved or deleted. Each
 result is named <time>_<first image>_<model>_s<seed>, for example 20261013-225301_photo_2511_s42, and rope
 keeps with it the recipe, the API workflow that ComfyUI ran, and a repro.sh. --into puts the results in a rope
-folder, and an input can be @ID, an image in rope. --replay ID makes an image again from that record and
+folder, made if there is none, and an input can be @ID, an image in rope. --replay ID makes an image again from that record and
 compares the pixels. The PNG also embeds the API workflow ComfyUI ran; drop it on the ComfyUI page to see that
 workflow as a node graph.
 """
@@ -1042,7 +1042,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                              "every input, so that a result can be made again after its inputs are moved or deleted. "
                              "rope has to be built first.")
     g.add_argument("--into", metavar="FOLDER", default=os.environ.get("IMG2IMG_INTO") or None,
-                   help="the rope folder for the results, e.g. trips/kyoto; it must exist (rope mkdir -p ...). "
+                   help="the rope folder for the results, e.g. trips/kyoto, made if there is none. "
                         "Default: $IMG2IMG_INTO, else unfiled")
     g.add_argument("--tag", dest="tags", action="append", default=[], metavar="TAG", help="tag the results; repeatable")
     g.add_argument("--note", help="a note on each result")
@@ -1114,7 +1114,9 @@ def main(argv: list[str]) -> int:
     at_ids = any(str(i).startswith("@") and not i.exists() for i in a.images)
     a.lib = Library.find(a) if not a.dry_run or at_ids else None
     if a.into and not a.dry_run:
-        call_library(a.lib, "where", f"--folder={a.into}")  # a missing folder fails now, not after the GPU work
+        # made now, so that a name rope refuses fails before the GPU work, and a typo shows up right here
+        if call_library(a.lib, "mkdir", "-p", a.into)["created"]:
+            print(f"new rope folder {a.into}")
     resolve_images(a)
     a.stem = a.names[0]
     with tempfile.TemporaryDirectory(prefix="img2img-") as workdir:
