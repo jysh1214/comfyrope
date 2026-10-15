@@ -108,7 +108,7 @@ An image's id is the SHA-256 of its file:
 | `rope note ID [--set T \| --append T \| -e]` | Print or change the note; `-e` edits it in `$EDITOR` |
 | `rope tag add\|rm T ID...`, `rope tag rename OLD NEW`, `rope tags` | Manage tags |
 | `rope fav ID... [--off]` | Mark images as favorites, or unmark them; rope-gui shows favorites first |
-| `rope prompt add TITLE [TEXT \| --from ID]`, `rope prompt ls`, `rope prompt show NAME`, `rope prompt edit NAME [--title T] [--text T] [-e]`, `rope prompt rm NAME` | Keep prompts to use again. `show` prints the text, so `"$(rope prompt show 黃昏海邊)"` puts it in a command; `--from` takes the prompt an image was made with; NAME is a title or an id |
+| `rope prompt add TITLE [TEXT \| --from ID]`, `rope prompt ls`, `rope prompt show NAME`, `rope prompt edit NAME [--title T] [--text T] [-e]`, `rope prompt mv NAME N`, `rope prompt rm NAME` | Keep prompts to use again. `show` prints the text, so `"$(rope prompt show 黃昏海邊)"` puts it in a command; `--from` takes the prompt an image was made with; `mv` puts it at position N; NAME is a title or an id |
 | `rope lineage ID [--up \| --down]` | The tree of images above or below |
 | `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full `img2img.py` command, to change and run as a variation |
 | `rope rm ID...`, `rope restore ID...` | Move images to the trash, or back out |
@@ -148,7 +148,7 @@ The window runs on its own: the command returns at once, and closing the termina
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.
 - The recipe, replays, and sources; a source that no longer exists is marked gone.
 
-**Prompts**, chosen on the left: prompts worth keeping, each with a title. The list is in the middle; click one to edit it on the right, where Save writes it, Copy puts its text on the clipboard and Delete… removes it. New prompt adds one at once, titled Draft (then Draft 2, …) with no text yet, and puts the cursor in the text, to paste into now or later; Save prompt under an image's recipe adds that image's prompt under the image's name. The search box filters them. On this page Delete, Ctrl+C and Esc act on the prompt being edited. `rope prompt` reaches the same list from the terminal.
+**Prompts**, chosen on the left: prompts worth keeping, each with a title. The list is in the middle; click one to edit it on the right, where Save writes it, Copy puts its text on the clipboard and Delete… removes it. New prompt adds one at once, titled Draft (then Draft 2, …) with no text yet, and puts the cursor in the text, to paste into now or later; Save prompt under an image's recipe adds that image's prompt under the image's name. Drag a card up or down to put it elsewhere in the list. The search box filters them. On this page Delete, Ctrl+C and Esc act on the prompt being edited. `rope prompt` reaches the same list from the terminal.
 
 **Keys**, when no text field has focus (Backspace works wherever Delete does: an Apple keyboard's delete key sends it):
 

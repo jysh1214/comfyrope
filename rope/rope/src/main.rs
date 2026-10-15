@@ -299,6 +299,8 @@ enum PromptCmd {
         #[arg(short, long)]
         edit: bool,
     },
+    /// Move a prompt to a position in the list, counted from 1
+    Mv { name: String, position: usize },
     /// Remove a prompt
     Rm { name: String },
 }
@@ -935,6 +937,20 @@ fn prompt(lib: &Library, json: bool, cmd: PromptCmd) -> Result<()> {
             }
             let p = prompts::edit(lib, &id, title.as_deref(), text.as_deref())?;
             emit(json, prompt_json(&p), || println!("{}  {}", p.id, p.title))
+        }
+        PromptCmd::Mv { name, position } => {
+            let ps = prompts::Prompts::load(lib)?;
+            let p = ps.find(&name)?.clone();
+            if position == 0 {
+                bail!("positions start at 1");
+            }
+            // the prompt that will follow it: the one now at that position, skipping itself
+            let before = ps.prompts.iter().filter(|q| q.id != p.id).nth(position - 1).map(|q| q.id.clone());
+            prompts::move_before(lib, &p.id, before.as_deref())?;
+            let at = prompts::Prompts::load(lib)?.prompts.iter().position(|q| q.id == p.id).unwrap_or(0) + 1;
+            emit(json, json!({"id": p.id, "title": p.title, "position": at}), || {
+                println!("{}  {} is at {at}", p.id, p.title)
+            })
         }
         PromptCmd::Rm { name } => {
             let id = prompts::Prompts::load(lib)?.find(&name)?.id.clone();

@@ -4,7 +4,7 @@
 
 use super::{Action, App, Dialog};
 use crate::model::View;
-use eframe::egui::{self, RichText, Sense};
+use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Vec2};
 use rope_core::prompts::{self, Prompt, Prompts};
 use std::collections::HashSet;
 
@@ -117,14 +117,15 @@ impl App {
             .collect()
     }
 
-    /// The middle of the window on the Prompts page: the list.
+    /// The middle of the window on the Prompts page: the list. A card opens the prompt in the editor on a click,
+    /// and is dragged up or down to put it elsewhere in the list; a line shows where it will land.
     pub(super) fn prompt_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
             if ui.button("New prompt").on_hover_text("adds a Draft with no text yet; paste the text in and save").clicked() {
                 actions.push(Action::AddPrompt { title: None, text: String::new() });
             }
             ui.label(
-                RichText::new("Prompts to use again. Copy one into the next img2img.py command, or in a shell: \"$(rope prompt show TITLE)\"")
+                RichText::new("Prompts to use again. Copy one into the next img2img.py command, or in a shell: \"$(rope prompt show TITLE)\". Drag a card to reorder.")
                     .weak()
                     .small(),
             );
@@ -132,6 +133,8 @@ impl App {
         ui.add_space(4.0);
         let shown = self.prompts_shown();
         if shown.is_empty() {
+            self.prompt_drag = None;
+            self.prompt_rects.clear();
             ui.centered_and_justified(|ui| {
                 ui.label(
                     RichText::new(if self.search.trim().is_empty() { "No prompts yet" } else { "Nothing matches" })
@@ -141,9 +144,13 @@ impl App {
             return;
         }
         let current = self.prompt.as_ref().map(|e| e.id.clone());
+        let dragging = self.prompt_drag.clone();
+        let mut rects: Vec<(String, Rect)> = Vec::with_capacity(shown.len());
+        let mut started = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for p in &shown {
                 let selected = current.as_deref() == Some(p.id.as_str());
+                let lifted = dragging.as_deref() == Some(p.id.as_str());
                 let fill = if selected {
                     ui.visuals().selection.bg_fill.gamma_multiply(0.35)
                 } else {
@@ -152,6 +159,9 @@ impl App {
                 let resp = egui::Frame::group(ui.style())
                     .fill(fill)
                     .show(ui, |ui| {
+                        if lifted {
+                            ui.set_opacity(0.4);
+                        }
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&p.title).strong());
@@ -167,13 +177,58 @@ impl App {
                             ui.add(egui::Label::new(RichText::new(&p.text).small()).wrap());
                         }
                     })
-                    .response;
-                if resp.interact(Sense::click()).clicked() {
+                    .response
+                    .interact(Sense::click_and_drag());
+                if resp.clicked() {
                     actions.push(Action::EditPrompt(p.id.clone()));
                 }
+                if resp.drag_started() {
+                    started = Some(p.id.clone());
+                }
+                rects.push((p.id.clone(), resp.rect));
                 ui.add_space(4.0);
             }
         });
+        if started.is_some() {
+            self.prompt_drag = started;
+        }
+        self.prompt_rects = rects;
+        let Some(id) = self.prompt_drag.clone() else { return };
+        let (pos, released, escape) =
+            ui.input(|i| (i.pointer.interact_pos(), i.pointer.any_released(), i.key_pressed(egui::Key::Escape)));
+        // the card that will follow it: the first whose middle is below the pointer, itself skipped
+        let before = pos.and_then(|pos| {
+            self.prompt_rects.iter().filter(|(i, _)| *i != id).find(|(_, r)| pos.y < r.center().y).cloned()
+        });
+        if escape || (released && pos.is_none()) {
+            self.prompt_drag = None;
+        } else if released {
+            self.prompt_drag = None;
+            actions.push(Action::MovePrompt { id, before: before.map(|(i, _)| i) });
+        } else {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            let y = match &before {
+                Some((_, r)) => r.min.y - 2.0,
+                None => self.prompt_rects.last().map_or(0.0, |(_, r)| r.max.y + 2.0),
+            };
+            let (x0, x1) = self.prompt_rects.first().map_or((0.0, 0.0), |(_, r)| (r.min.x, r.max.x));
+            let color = ui.visuals().selection.stroke.color;
+            ui.painter().hline(x0..=x1, y, egui::Stroke::new(3.0, color));
+            if let Some(pos) = pos
+                && let Some(p) = self.model().prompts.get(&id)
+            {
+                let painter =
+                    ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("prompt-drag")));
+                painter.text(
+                    pos + Vec2::new(14.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    &p.title,
+                    FontId::proportional(14.0),
+                    color,
+                );
+            }
+            ui.ctx().request_repaint();
+        }
     }
 
     /// The right side on the Prompts page: the editor.

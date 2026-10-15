@@ -141,14 +141,10 @@ impl Library {
     /// slip its inputs in between purge reading `runs/` and deleting.
     pub fn try_run_lock(&self) -> Result<Option<Lock>> {
         let file = self.lock_file("run.lock")?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Lock { _file: file })),
-            Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(e)) => Err(e).context("cannot lock run.lock"),
-        }
+        Ok(try_lock(&file).context("cannot lock run.lock")?.then_some(Lock { _file: file }))
     }
 
-    fn lock_file(&self, name: &str) -> Result<File> {
+    pub(crate) fn lock_file(&self, name: &str) -> Result<File> {
         let path = self.root.join(name);
         OpenOptions::new()
             .create(true)
@@ -172,6 +168,22 @@ impl Library {
         }
         Ok(())
     }
+}
+
+/// Takes an exclusive flock on `file` without waiting for a holder: `false` when someone holds it. A lock just
+/// let go can look held for an instant: a process of this user between fork and exec carries a copy of every
+/// open file, locks included, until the exec closes them. So a few tries over about a tenth of a second are
+/// made before the lock counts as held.
+pub(crate) fn try_lock(file: &File) -> std::io::Result<bool> {
+    for attempt in 0..6 {
+        match file.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(TryLockError::WouldBlock) if attempt < 5 => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(TryLockError::WouldBlock) => return Ok(false),
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

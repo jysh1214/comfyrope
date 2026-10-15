@@ -104,6 +104,11 @@ enum Action {
     },
     SavePrompt,
     ClosePrompt,
+    /// Put a prompt before another in the list, or at the end.
+    MovePrompt {
+        id: String,
+        before: Option<String>,
+    },
     CopyText(String),
 }
 
@@ -132,6 +137,9 @@ pub struct App {
     viewer: Option<viewer::Viewer>,
     /// The prompt open in the editor of the Prompts page.
     prompt: Option<prompts::PromptEdit>,
+    /// The prompt being dragged to another place in the list, and where the cards are, to see where it lands.
+    prompt_drag: Option<String>,
+    prompt_rects: Vec<(String, Rect)>,
 }
 
 impl App {
@@ -180,6 +188,8 @@ impl App {
             open_on_load: open,
             viewer: None,
             prompt: None,
+            prompt_drag: None,
+            prompt_rects: Vec::new(),
         };
         match watcher {
             Ok(w) => app._watcher = Some(w),
@@ -323,6 +333,10 @@ impl App {
             Action::AddPrompt { title, text } => self.add_prompt(title, &text)?,
             Action::SavePrompt => self.save_prompt()?,
             Action::ClosePrompt => self.prompt = None,
+            Action::MovePrompt { id, before } => {
+                rope_core::prompts::move_before(&self.lib, &id, before.as_deref())?;
+                self.refresh();
+            }
             Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
             Action::Select(id, pick) => {
                 match pick {
@@ -1687,6 +1701,30 @@ mod tests {
         panic!("the window never got there");
     }
 
+    /// Presses the mouse at `from`, moves it to `to` and lets go, over four frames.
+    fn drag(ctx: &egui::Context, app: &mut App, from: egui::Pos2, to: egui::Pos2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames = [
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![button(to, false)],
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.frame(ctx));
+        }
+    }
+
     /// Draws one frame in which `key` is pressed.
     fn press(ctx: &egui::Context, app: &mut App, key: egui::Key) {
         let event = egui::Event::Key {
@@ -2004,6 +2042,18 @@ mod tests {
         app.edit_prompt(&saved.id);
         let other = rope_core::prompts::add(&lib, "Night", "星空").unwrap();
         frames_until(&ctx, &mut app, |a| a.model().prompts.prompts.len() == 2);
+
+        // dragging a card above another puts it there
+        let third = rope_core::prompts::add(&lib, "Third", "三").unwrap();
+        frames_until(&ctx, &mut app, |a| a.prompt_rects.len() == 3);
+        let rect = |a: &App, id: &str| a.prompt_rects.iter().find(|(i, _)| i == id).unwrap().1;
+        let (from, to) = (rect(&app, &third.id).center(), rect(&app, &saved.id).min + Vec2::new(10.0, 2.0));
+        drag(&ctx, &mut app, from, to);
+        frames_until(&ctx, &mut app, |a| a.model().prompts.prompts[0].id == third.id);
+        let order: Vec<&str> = app.model().prompts.prompts.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(order, ["Third", "result", "Night"]);
+        assert!(app.prompt_drag.is_none());
+        app.delete_prompt(&third.id).unwrap();
         app.search = "night".into();
         assert_eq!(app.prompts_shown().len(), 1);
         app.search.clear();

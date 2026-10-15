@@ -138,6 +138,23 @@ pub fn edit(lib: &Library, id: &str, title: Option<&str>, text: Option<&str>) ->
     })
 }
 
+/// Moves the prompt `id` to just before the prompt `before`, or to the end without one.
+pub fn move_before(lib: &Library, id: &str, before: Option<&str>) -> Result<()> {
+    if before == Some(id) {
+        return Ok(());
+    }
+    edit_prompts(lib, |ps| {
+        let i = ps.prompts.iter().position(|p| p.id == id).with_context(|| format!("no prompt {id}"))?;
+        let moved = ps.prompts.remove(i);
+        let at = match before {
+            Some(b) => ps.prompts.iter().position(|p| p.id == b).with_context(|| format!("no prompt {b}"))?,
+            None => ps.prompts.len(),
+        };
+        ps.prompts.insert(at, moved);
+        Ok(())
+    })
+}
+
 pub fn remove(lib: &Library, id: &str) -> Result<Prompt> {
     edit_prompts(lib, |ps| {
         let i = ps.prompts.iter().position(|p| p.id == id).with_context(|| format!("no prompt {id}"))?;
@@ -170,6 +187,17 @@ mod tests {
         assert!(ps.find("sky").unwrap_err().to_string().contains("several"));
         assert_eq!(ps.find("starry").unwrap().id, sky.id);
 
+        let titles = |lib: &Library| -> Vec<String> {
+            Prompts::load(lib).unwrap().prompts.iter().map(|p| p.title.clone()).collect()
+        };
+        move_before(&lib, &sea.id, None).unwrap();
+        assert_eq!(titles(&lib), ["Starry sky", "Sky at dawn", "黃昏海邊"]);
+        move_before(&lib, &sea.id, Some(&sky.id)).unwrap();
+        assert_eq!(titles(&lib), ["黃昏海邊", "Starry sky", "Sky at dawn"]);
+        move_before(&lib, &sky.id, Some(&sky.id)).unwrap();
+        assert_eq!(titles(&lib), ["黃昏海邊", "Starry sky", "Sky at dawn"], "before itself: stays");
+        assert!(move_before(&lib, "nope", None).is_err());
+
         let sky2 = edit(&lib, &sky.id, Some("Night sky"), None).unwrap();
         assert_eq!((sky2.title.as_str(), sky2.text.as_str()), ("Night sky", "把天空換成星空"));
         assert!(edit(&lib, "nope", None, Some("x")).is_err());
@@ -177,6 +205,6 @@ mod tests {
         let ps = Prompts::load(&lib).unwrap();
         assert_eq!(ps.prompts.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(), ["Night sky", "Sky at dawn"]);
         let journal = fs::read_to_string(lib.journal_path()).unwrap();
-        assert_eq!(journal.matches(r#""op":"prompt""#).count(), 5);
+        assert_eq!(journal.matches(r#""op":"prompt""#).count(), 7);
     }
 }

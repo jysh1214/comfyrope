@@ -8,7 +8,6 @@ use crate::Library;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs::TryLockError;
 use std::fs::{self, File};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,21 +37,17 @@ pub fn scan(lib: &Library) -> Result<(Vec<Run>, Vec<String>)> {
             continue;
         }
         let Ok(file) = File::open(&path) else { continue }; // gone since the listing
-        match file.try_lock() {
-            Ok(()) => {
-                if fs::remove_file(&path).is_ok() {
-                    removed.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-                }
+        if crate::library::try_lock(&file).with_context(|| format!("cannot lock {}", path.display()))? {
+            if fs::remove_file(&path).is_ok() {
+                removed.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
             }
-            Err(TryLockError::WouldBlock) => {
-                let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-                // a run that has just taken its lock may not have written the file yet; it holds run.lock
-                // shared meanwhile, which purge excludes, so this is only for a reader outside purge
-                if let Ok(run) = serde_json::from_str::<Run>(&text) {
-                    out.push(run);
-                }
+        } else {
+            let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+            // a run that has just taken its lock may not have written the file yet; it holds run.lock shared
+            // meanwhile, which purge excludes, so this is only for a reader outside purge
+            if let Ok(run) = serde_json::from_str::<Run>(&text) {
+                out.push(run);
             }
-            Err(TryLockError::Error(e)) => return Err(e).with_context(|| format!("cannot lock {}", path.display())),
         }
     }
     out.sort_by_key(|r| r.pid);
