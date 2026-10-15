@@ -24,11 +24,13 @@ BASE = img2img.Request(
     # note=None
 )
 
-# 2. The settings to vary: every model; for 2511, every Lightning setting and every choice of LoRAs, each one in or
-#    out, the empty choice included (2 ** len(LORAS) choices). 2.1 runs plain: no Lightning LoRA, no LoRAs.
-MODELS = ["2511", "2.1"]
-LIGHTNING = ["4", "8"]
-LORAS = ["qwen-edit-skin-1.1", "Skin_Fix_rank64:0.8"]  # name[:strength], as on the command line; .safetensors implied
+# 2. The settings to vary: every model in LORAS, with every choice of its LoRAs, each one in or out, the empty
+#    choice included (2 ** len(LoRAs) choices), and for 2511 every Lightning setting as well.
+LORAS = {  # model -> its LoRAs, name[:strength] as on the command line (.safetensors implied); [] for plain only
+    "2511": ["qwen-edit-skin-1.1", "Skin_Fix_rank64:0.8"],
+    "2.1": [],
+}
+LIGHTNING = ["4", "8"]  # 2511 only
 
 # The ComfyUI options, as run() takes them: server, keep_server, no_start, comfy_args, timeout, fresh, library.
 OPTIONS = {"fresh": False}
@@ -51,9 +53,8 @@ def folder(model: str, loras: tuple[str, ...]) -> str:
 def batch():
     """The requests, one per combination, each BASE with the combination's fields changed."""
     # 3. The grid.
-    for model in MODELS:
-        lightnings, lora_choices = (LIGHTNING, choices(LORAS)) if model == "2511" else ([None], [()])
-        for lightning, loras in itertools.product(lightnings, lora_choices):
+    for model, loras_of_model in LORAS.items():
+        for lightning, loras in itertools.product(LIGHTNING if model == "2511" else [None], choices(loras_of_model)):
             yield dataclasses.replace(BASE, model=model, lightning=lightning, lora=list(loras), into=folder(model, loras))
 
 
