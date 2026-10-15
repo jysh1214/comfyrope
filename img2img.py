@@ -35,6 +35,20 @@ keeps with it the recipe, the API workflow that ComfyUI ran, and a repro.sh. --i
 folder, made if there is none, and an input can be @ID, an image in rope. --replay ID makes an image again from that record and
 compares the pixels. The PNG also embeds the API workflow ComfyUI ran; drop it on the ComfyUI page to see that
 workflow as a node graph.
+
+From Python, import it and give run() a Request per combination to try: they all go through one ComfyUI, and
+every result lands in rope with its recipe, so the combinations can be compared in rope-gui:
+
+    import img2img
+    skin = "qwen-edit-skin-1.1.safetensors"
+    requests = [img2img.Request(["photo.jpg"], "make the subjects skin details more prominent and natural",
+                                seed=42, lora=[(skin, s)], into="tests/skin", tags=[f"skin {s}"])
+                for s in (0.8, 1.0, 1.2)]
+    for r in img2img.run(requests):
+        print(r.short, r.folder, r.request.lora)
+
+A Request has a field per option above, and run() takes the ComfyUI and --library options as keyword arguments.
+The Python that imports it needs the packages listed at the top, e.g. .venv from setup_venv.sh.
 """
 from __future__ import annotations
 
@@ -58,9 +72,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+
+__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
 
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE / "run_comfyui.sh"
@@ -105,8 +122,13 @@ RAW_SUFFIXES = {".dng", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", 
                 ".pef", ".srw", ".x3f", ".3fr", ".iiq", ".rwl", ".mrw", ".erf", ".kdc", ".dcr", ".mos"}
 
 
+class Error(Exception):
+    """What stops a run; the message says what went wrong and, where there is one, the fix. The command line
+    prints it as `error: ...` and exits with 1."""
+
+
 def die(msg: str) -> NoReturn:
-    raise SystemExit(f"error: {msg}")
+    raise Error(msg)
 
 
 def tilde(p: Path) -> str:
@@ -134,6 +156,121 @@ class Status:
             sys.stdout.write("\r\x1b[K")
         self.stage = ""
         print(text)
+
+
+# ---------------------------------------------------------------- requests and results
+
+def parse_lora(text: str) -> tuple[str, float]:
+    """"style.safetensors:0.8" -> ("style.safetensors", 0.8); the strength defaults to 1, the suffix to .safetensors."""
+    name, strength = text, 1.0
+    head, sep, tail = text.rpartition(":")
+    if sep:
+        try:
+            name, strength = head, float(tail)
+        except ValueError:
+            pass
+    if not re.search(r"\.(safetensors|ckpt|pt|pth|bin)$", name):
+        name += ".safetensors"
+    return name, strength
+
+
+def rope_ref(img: Path) -> bool:
+    """@ID names an image in rope, unless a file of that name exists."""
+    return str(img).startswith("@") and not img.exists()
+
+
+@dataclass
+class Request:
+    """What to make: the input images, the prompt and the settings, one field per command-line option (see
+    parse_args, or --help). A field left at None takes the option's default; settled() fills them in."""
+
+    images: list[Path | str]  # the inputs, or "@ID" for an image in rope; the first one sets the output size
+    prompt: str
+    model: str = "2511"  # "2511" (Qwen-Image-Edit-2511) or "2.1" (Qwen-Image-2.1)
+    count: int = 1  # -n: how many images, one seed each
+    seed: int | None = None  # -s: the first image's seed; None picks one at random
+    negative: str = ""  # only has an effect when cfg is above 1
+    steps: int | None = None
+    cfg: float | None = None
+    lora: list[tuple[str, float] | str] = field(default_factory=list)  # ("style.safetensors", 0.8), or "style.safetensors:0.8"
+    lightning: str | None = None  # 2511 only: "4", "8" or "off"; default "4"
+    resolution: int | None = None  # 2.1 only; default 1024
+    enhance: bool = False  # 2.1 only: the prompt enhancer
+    into: str | None = None  # the rope folder; default $IMG2IMG_INTO, else unfiled
+    tags: list[str] = field(default_factory=list)
+    note: str | None = None
+
+    def settled(self) -> Request:
+        """A copy with the defaults filled in and the settings checked, which is what run() works from and what a
+        Result reports. A bad setting is a ValueError. The original is left as it is."""
+        r = copy.copy(self)
+        r.images = [Path(i) for i in ([self.images] if isinstance(self.images, (str, Path)) else self.images)]
+        r.model = str(self.model)
+        r.tags = [str(t) for t in ([self.tags] if isinstance(self.tags, str) else self.tags)]
+        loras = [self.lora] if isinstance(self.lora, str) else list(self.lora)
+        r.lora = [parse_lora(l) if isinstance(l, str) else (str(l[0]), float(l[1])) for l in loras]
+        r.into = self.into or os.environ.get("IMG2IMG_INTO") or None
+        r.note = self.note or None
+        if not r.images:
+            raise ValueError("an input image is needed")
+        for img in r.images:
+            if not img.is_file() and not rope_ref(img):
+                raise ValueError(f"no such image: {img}")
+        if r.model not in MAX_IMAGES:
+            raise ValueError(f"model must be {' or '.join(MAX_IMAGES)}, not {r.model}")
+        if len(r.images) > MAX_IMAGES[r.model]:
+            raise ValueError(f"model {r.model} takes at most {MAX_IMAGES[r.model]} images")
+        if r.count < 1:
+            raise ValueError("count must be at least 1")
+        if r.model == "2511":
+            if r.resolution is not None or r.enhance:
+                raise ValueError("resolution and enhance are for Qwen-Image-2.1 only (model 2.1)")
+            r.lightning = "4" if self.lightning is None else str(self.lightning)
+            if r.lightning not in (*LIGHTNING, "off"):
+                raise ValueError(f"lightning must be 4, 8 or off, not {r.lightning}")
+            fast = r.lightning != "off"
+            r.steps = self.steps or (int(r.lightning) if fast else 40)
+            r.cfg = (1.0 if fast else 4.0) if self.cfg is None else float(self.cfg)
+        else:
+            if self.lightning is not None:
+                raise ValueError("lightning is for Qwen-Image-Edit-2511 only (model 2511)")
+            r.resolution = 1024 if self.resolution is None else self.resolution
+            if not 0 <= r.resolution <= 4096:
+                raise ValueError("resolution takes 0 to 4096")
+            r.steps = self.steps or 25
+            r.cfg = 1.0 if self.cfg is None else float(self.cfg)
+        return r
+
+
+@dataclass
+class Options:
+    """How to reach ComfyUI and rope: run()'s keyword arguments, the command line's ComfyUI and --library options."""
+
+    server: str = SERVER
+    keep_server: bool = False
+    no_start: bool = False
+    comfy_args: list[str] = field(default_factory=list)
+    timeout: int = TIMEOUT
+    fresh: bool = False
+    library: str | None = None
+
+
+@dataclass
+class Result:
+    """One image run() made, and where it went."""
+
+    request: Request  # settled: the settings as run, every default filled in
+    index: int  # which of the request's `count` images, from 1
+    seed: int
+    id: str = ""  # rope's id, the PNG's SHA-256; "" when rope could not keep it (then `path` is in rescue/)
+    short: str = ""  # the id as rope shows it, its first 12 digits
+    path: Path | None = None  # the PNG: in rope, or in rescue/ when rope could not keep it
+    folder: str | None = None  # its rope folder; None when unfiled
+    created: bool = False  # False: rope had these bytes already (ComfyUI answered from its cache)
+    width: int = 0
+    height: int = 0
+    seconds: float = 0.0  # from the job's start in ComfyUI to its result
+    enhanced_prompt: str = ""  # what the 2.1 prompt enhancer wrote, with enhance=True
 
 
 # ---------------------------------------------------------------- input images
@@ -238,7 +375,7 @@ def add_loras(g: Graph, model: str, loras: list[tuple[str, float]]) -> str:
     return model
 
 
-def build_2511(a: argparse.Namespace, images: list[str], seed: int) -> Graph:
+def build_2511(r: Request, images: list[str], seed: int) -> Graph:
     """ComfyUI template 'Qwen Image Edit 2511', flattened."""
     g = Graph()
     loads = [g.add("LoadImage", image=name) for name in images]
@@ -248,17 +385,17 @@ def build_2511(a: argparse.Namespace, images: list[str], seed: int) -> Graph:
     vae = g.add("VAELoader", vae_name=EDIT_2511["vae"])
     model = g.add("ModelSamplingAuraFlow", model=link(unet), shift=3.1)
     model = g.add("CFGNorm", model=link(model), strength=1.0)
-    if a.lightning != "off":
-        model = g.add("LoraLoaderModelOnly", model=link(model), lora_name=LIGHTNING[a.lightning], strength_model=1.0)
-    model = add_loras(g, model, a.lora)
+    if r.lightning != "off":
+        model = g.add("LoraLoaderModelOnly", model=link(model), lora_name=LIGHTNING[r.lightning], strength_model=1.0)
+    model = add_loras(g, model, r.lora)
     refs = {"image1": link(first), **{f"image{i}": link(n) for i, n in enumerate(loads[1:], start=2)}}
     pos = g.add("TextEncodeQwenImageEditPlus", "encoding the prompt and images",
-                clip=link(clip), vae=link(vae), prompt=a.prompt, **refs)
-    neg = g.add("TextEncodeQwenImageEditPlus", clip=link(clip), vae=link(vae), prompt=a.negative, **refs)
+                clip=link(clip), vae=link(vae), prompt=r.prompt, **refs)
+    neg = g.add("TextEncodeQwenImageEditPlus", clip=link(clip), vae=link(vae), prompt=r.negative, **refs)
     pos = g.add("FluxKontextMultiReferenceLatentMethod", conditioning=link(pos), reference_latents_method="index_timestep_zero")
     neg = g.add("FluxKontextMultiReferenceLatentMethod", conditioning=link(neg), reference_latents_method="index_timestep_zero")
     latent = g.add("VAEEncode", pixels=link(first), vae=link(vae))
-    sampled = g.add("KSampler", "sampling", model=link(model), seed=seed, steps=a.steps, cfg=a.cfg,
+    sampled = g.add("KSampler", "sampling", model=link(model), seed=seed, steps=r.steps, cfg=r.cfg,
                     sampler_name="euler", scheduler="simple", positive=link(pos), negative=link(neg),
                     latent_image=link(latent), denoise=1.0)
     decoded = g.add("VAEDecode", "decoding", samples=link(sampled), vae=link(vae))
@@ -266,30 +403,30 @@ def build_2511(a: argparse.Namespace, images: list[str], seed: int) -> Graph:
     return g
 
 
-def build_21(a: argparse.Namespace, images: list[str], seed: int, system_prompt: str | None) -> Graph:
+def build_21(r: Request, images: list[str], seed: int, system_prompt: str | None) -> Graph:
     """ComfyUI template 'Qwen Image 2.1: Image Edit', flattened; the prompt enhancer only with --enhance."""
     g = Graph()
     loads = [g.add("LoadImage", image=name) for name in images]
     unet = g.add("UNETLoader", "loading the diffusion model", unet_name=Q21["unet"], weight_dtype="default")
-    model = add_loras(g, unet, a.lora)
+    model = add_loras(g, unet, r.lora)
     model = g.add("QwenImage21Cache", model=link(model), device="auto", dtype="default")
     clip = g.add("CLIPLoader", "loading the text encoder", clip_name=Q21["clip"], type="qwen_image", device="default")
     vae = g.add("VAELoader", vae_name=Q21["vae"])
-    prompt: str | list = a.prompt
-    if a.enhance:
+    prompt: str | list = r.prompt
+    if r.enhance:
         pe = g.add("CLIPLoader", "loading the prompt enhancer", clip_name=Q21["pe"], type="qwen_image", device="default")
         batch = g.add("BatchImagesNode", **{f"images.image{i}": link(n) for i, n in enumerate(loads)})
         sampling = {"temperature": 1.0, "top_k": 20, "top_p": 0.95, "min_p": 0.0,
                     "repetition_penalty": 1.0, "seed": seed, "presence_penalty": 0.0}
-        gen = g.add("TextGenerate", "enhancing the prompt", clip=link(pe), image=link(batch), prompt=a.prompt,
+        gen = g.add("TextGenerate", "enhancing the prompt", clip=link(pe), image=link(batch), prompt=r.prompt,
                     system_prompt=system_prompt, max_length=4096, thinking=False, use_default_template=True,
                     mtp="auto", sampling_mode="on", **{f"sampling_mode.{k}": v for k, v in sampling.items()})
         g.text_out = g.add("PreviewAny", source=link(gen))
         prompt = link(gen)
     enc = g.add("TextEncodeQwenImage21", "encoding the prompt and images", clip=link(clip), vae=link(vae),
-                prompt=prompt, negative_prompt=a.negative, resolution=a.resolution,
+                prompt=prompt, negative_prompt=r.negative, resolution=r.resolution,
                 **{f"images.image_{i}": link(n) for i, n in enumerate(loads, start=1)})
-    sampled = g.add("KSampler", "sampling", model=link(model), seed=seed, steps=a.steps, cfg=a.cfg,
+    sampled = g.add("KSampler", "sampling", model=link(model), seed=seed, steps=r.steps, cfg=r.cfg,
                     sampler_name="euler", scheduler="simple", positive=link(enc, 0), negative=link(enc, 1),
                     latent_image=link(enc, 2), denoise=1.0)  # the encoder's latent has image 1's size
     decoded = g.add("VAEDecode", "decoding", samples=link(sampled), vae=link(vae))
@@ -297,13 +434,14 @@ def build_21(a: argparse.Namespace, images: list[str], seed: int, system_prompt:
     return g
 
 
-def build(a: argparse.Namespace, images: list[str], seed: int, system_prompt: str | None) -> Graph:
-    return build_2511(a, images, seed) if a.model == "2511" else build_21(a, images, seed, system_prompt)
+def build(r: Request, images: list[str], seed: int, system_prompt: str | None) -> Graph:
+    """The API workflow for a settled request, with `images` as ComfyUI names its uploads."""
+    return build_2511(r, images, seed) if r.model == "2511" else build_21(r, images, seed, system_prompt)
 
 
 # ---------------------------------------------------------------- ComfyUI client
 
-class ComfyError(Exception):
+class ComfyError(Error):
     def __init__(self, status: int, body: bytes) -> None:
         super().__init__(f"HTTP {status}: {body[:200]!r}")
         self.status, self.body = status, body
@@ -488,8 +626,8 @@ def explain_rejection(body: bytes) -> str:
 
 # ---------------------------------------------------------------- rope library
 
-class LibraryError(Exception):
-    pass
+class LibraryError(Error):
+    """rope refused or failed; the message is rope's own."""
 
 
 class Library:
@@ -506,16 +644,14 @@ class Library:
         self.run_lock = None
 
     @staticmethod
-    def find(a: argparse.Namespace) -> Library:
-        """The library: results have nowhere else to go, so a missing rope stops the run before any GPU work."""
+    def find(library: str | None = None) -> Library:
+        """The library (--library, else $ROPE_LIBRARY, else ~/.local/share/rope): results have nowhere else to go,
+        so a missing rope stops the run before any GPU work."""
         exe = os.environ.get("ROPE") or (str(ROPE_BUILD) if ROPE_BUILD.exists() else shutil.which("rope"))
         if not exe:
             die(f"rope is not built; build it with: {ROPE_HOWTO} (see rope/README.md)")
-        lib = Library(exe, [f"--library={a.library}"] if a.library else [])
-        try:
-            lib.root = Path(lib.call("where")["library"])
-        except LibraryError as e:
-            die(str(e))
+        lib = Library(exe, [f"--library={library}"] if library else [])
+        lib.root = Path(lib.call("where")["library"])
         return lib
 
     def call(self, *args: str):
@@ -572,13 +708,6 @@ class Library:
                 pass
             Library.run_file.close()
             Library.run_file = None
-
-
-def call_library(lib: Library, *args: str):
-    try:
-        return lib.call(*args)
-    except LibraryError as e:
-        die(str(e))
 
 
 def iso(t: time.struct_time) -> str:
@@ -716,15 +845,26 @@ def model_files(nodes: dict, hashes: ModelHashes) -> list[dict]:
     return out
 
 
-def start_model_files(a: argparse.Namespace, nodes: dict):
-    """model_files() in the background, so that hashing a new model file overlaps the GPU work. Says first which
-    files have to be read, since that takes a while the first time."""
-    hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
-    todo = [p for _, p in model_paths(nodes) if p is not None and hashes.cached(p.stat()) is None]
+def start_prehash(hashes: ModelHashes, graphs: list[dict]) -> Background:
+    """Hashes the model files of these workflows in the background, so that reading a new model file overlaps the
+    GPU work. Says first which files have to be read, since that takes a while the first time."""
+    todo: dict[Path, os.stat_result] = {}
+    for nodes in graphs:
+        for _, path in model_paths(nodes):
+            if path is not None and path not in todo and hashes.cached(path.stat()) is None:
+                todo[path] = path.stat()
     if todo:
-        size = sum(p.stat().st_size for p in todo) / 1e9
+        size = sum(st.st_size for st in todo.values()) / 1e9
         print(f"hashing {len(todo)} model file(s), {size:.1f} GB, for the recipe; once, while the job runs")
-    return Background(model_files, nodes, hashes)
+
+    def read() -> None:
+        for path, st in todo.items():
+            try:
+                hashes.get(path, st)
+            except OSError:
+                pass  # model_files() records the file without a hash
+
+    return Background(read)
 
 
 class Background:
@@ -764,48 +904,48 @@ def decoder_versions() -> dict:
     return out
 
 
-def models(a: argparse.Namespace) -> list[dict]:
-    """The model files of this run, waiting for their hashes if they are still being computed."""
-    if isinstance(a.models, Background):
-        if not a.models.done.is_set():
-            print("  waiting for the model files' hashes")
-        return a.models.result()
-    return a.models
-
-
-def recipe(a: argparse.Namespace, job: Job, flags: list[str], enhanced: str) -> dict:
+def recipe(run: Run, job: Job, flags: list[str], enhanced: str) -> dict:
     """The made field of a result's meta.json in rope."""
     inputs = [{k: v for k, v in (("id", i.get("id")), ("uploaded", i.get("uploaded")), ("upload", name)) if v}
-              for i, name in zip(a.inputs, a.upload_names)]
-    made = {"by": "img2img.py", "at": iso(a.when), "flags": flags, "prompt": a.prompt, "inputs": inputs,
+              for i, name in zip(job.inputs.records, job.inputs.uploaded)]
+    made = {"by": "img2img.py", "at": iso(run.when), "flags": flags, "prompt": job.request.prompt, "inputs": inputs,
             "enhanced_prompt": enhanced or None,
-            "batch": {"index": job.index, "count": a.count, "first_seed": job.seed - job.index + 1},
-            "server": a.server_info or None, "env": a.env, "models": models(a), "code": a.code}
+            "batch": {"index": job.index, "count": job.request.count, "first_seed": job.seed - job.index + 1},
+            "server": run.server_info or None, "env": run.env, "models": run.models(job.graph.nodes), "code": run.code}
     return {k: v for k, v in made.items() if v is not None}
 
 
-def keep_result(a: argparse.Namespace, job: Job, data: bytes, enhanced: str, status: Status) -> str:
-    """Keeps one result in the library and returns what to show for it on the status line."""
+def keep_result(run: Run, job: Job, data: bytes, enhanced: str) -> str:
+    """Keeps one result in the library, as a Result on its job, and returns what to show for it on the status line."""
+    r = job.request
+
     def args(png: Path, made: Path, graph: Path) -> list[str]:
         out = ["add", str(png), f"--made={made}", f"--graph={graph}", f"--name={name}", f"--repo={HERE}"]
-        if a.into:
-            out += [f"--into={a.into}", "--file-inputs"]
-        out += [f"--tag={t}" for t in a.tags]
-        return out + ([f"--note={a.note}"] if a.note else [])
+        if r.into:
+            out += [f"--into={r.into}", "--file-inputs"]
+        out += [f"--tag={t}" for t in r.tags]
+        return out + ([f"--note={r.note}"] if r.note else [])
 
-    name = run_name(a, job.seed)
-    made = json.dumps(recipe(a, job, image_flags(a, job.seed), enhanced), ensure_ascii=False)
-    r = send_result(a, name, data, made, job, args, status)
-    if r is None:
+    name = run_name(run.when, job.inputs.names[0], r.model, job.seed)
+    made = json.dumps(recipe(run, job, image_flags(r, job.seed), enhanced), ensure_ascii=False)
+    result = Result(r, job.index, job.seed, seconds=job.took, enhanced_prompt=enhanced)
+    result.width, result.height = png_size(data) or (0, 0)
+    answer, rescued = send_result(run, name, data, made, job, args)
+    job.results.append(result)
+    if answer is None:
+        result.path = rescued
         return "not in rope; see above"
-    where = f"{r['short']}  {r['folder'] or '/'}"
-    return where if r["created"] else f"{where}  (rope had these bytes already)"
+    result.id, result.short, result.path = answer["id"], answer["short"], Path(answer["path"])
+    result.folder, result.created = answer["folder"], answer["created"]
+    where = f"{result.short}  {result.folder or '/'}"
+    return where if result.created else f"{where}  (rope had these bytes already)"
 
 
-def send_result(a: argparse.Namespace, name: str, data: bytes, made: str, job: Job, args, status: Status):
+def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args) -> tuple[dict | None, Path | None]:
     """Hands a result to rope: the PNG, its recipe and its workflow, as files for `rope ARGS`. Returns rope's
-    answer, or None when rope failed; the GPU work is done then, so the files go to rescue/ in the library (or
-    the system's temp folder) with the command that brings them in later."""
+    answer; or, when rope failed, None and the PNG where it went instead: the GPU work is done then, so the files
+    go to rescue/ in the library (or the system's temp folder) with the command that brings them in later."""
+    lib = run.lib
     graph = json.dumps(job.graph.nodes, ensure_ascii=False)
     with tempfile.TemporaryDirectory(prefix="img2img-result-") as tmp:
         files = Path(tmp) / f"{name}.png", Path(tmp) / "made.json", Path(tmp) / "graph.json"
@@ -813,10 +953,10 @@ def send_result(a: argparse.Namespace, name: str, data: bytes, made: str, job: J
         files[1].write_text(made, "utf-8")
         files[2].write_text(graph, "utf-8")
         try:
-            return a.lib.call(*args(*files))
+            return lib.call(*args(*files)), None
         except LibraryError as e:
             error = e
-    for base in (a.lib.root / "rescue", Path(tempfile.gettempdir()) / "img2img-rescue"):
+    for base in (lib.root / "rescue", Path(tempfile.gettempdir()) / "img2img-rescue"):
         try:
             base.mkdir(parents=True, exist_ok=True)
             folder = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=base))
@@ -829,62 +969,108 @@ def send_result(a: argparse.Namespace, name: str, data: bytes, made: str, job: J
             continue
     else:
         die(f"rope could not keep a result ({error}), and it could not be saved anywhere else either")
-    command = shlex.join([a.lib.exe, *a.lib.flags, *args(*files)])
+    command = shlex.join([lib.exe, *lib.flags, *args(*files)])
     script = folder / "bring-in.sh"
     script.write_text(f"#!/bin/sh\n# Hands this result to rope, which could not take it: {error}\nexec {command}\n", "utf-8")
     script.chmod(0o755)
-    status.line(f"  rope could not keep this result: {error}\n  it is saved in {tilde(folder)}; once rope works, "
-                f"bring it in with:\n    {tilde(script)}")
-    return None
+    run.status.line(f"  rope could not keep this result: {error}\n  it is saved in {tilde(folder)}; once rope works, "
+                    f"bring it in with:\n    {tilde(script)}")
+    return None, files[0]
 
 
-def keep_inputs(a: argparse.Namespace, workdir: Path) -> None:
-    """Prepares the inputs for upload. With the library, each input goes into it first, read once, and from then
-    on the library's copy is used: the library holds exactly the bytes ComfyUI reads, even if the original is moved
-    or rewritten while the job runs. A converted input's PNG is kept with it too."""
-    lib = None if a.dry_run else a.lib
-    if lib is not None:
+@dataclass
+class Inputs:
+    """One request's inputs, brought into rope and ready for ComfyUI."""
+
+    names: list[str]  # each input's name: the file's stem, or its rope name; the first one names the result
+    records: list[dict]  # per input, rope's "id" and "path" (and "uploaded", the id of its PNG conversion)
+    uploads: list[Path]  # the file to upload for each input: the input itself, or its PNG conversion
+    stems: list[str]  # the name part of each upload's server-side name
+    uploaded: list[str] = field(default_factory=list)  # the server-side names, once uploaded
+
+
+def resolve_input(lib: Library | None, img: Path) -> tuple[Path, str]:
+    """An input's file and name: the file itself and its stem; or, for @ID and for a file inside the library,
+    rope's copy and the image's rope name (not its hash), which names the result and the upload."""
+    in_library = lib is not None and img.exists() and img.resolve().is_relative_to(lib.root)
+    if rope_ref(img) or in_library:
+        if lib is None:
+            die(f"{img} names an image in rope, which this run does not use")
+        info = lib.call("show", str(img))
+        return Path(info["path"]), info["name"] or info["short"]
+    return img, img.stem
+
+
+def prepare(requests: list[Request], workdir: Path, lib: Library | None, keep: bool = True) -> list[Inputs]:
+    """The inputs of every request, ready for upload; a file several requests share is handled once. With `keep`,
+    each input goes into the library first, read once, and from then on the library's copy is used: the library
+    holds exactly the bytes ComfyUI reads, even if the original is moved or rewritten while the job runs. A
+    converted input's PNG is kept with it too. Without `keep` (a dry run), rope only says where @ID inputs are."""
+    wanted = [[resolve_input(lib, img) for img in r.images] for r in requests]
+    files: dict[Path, str] = {}  # each distinct file, with its name
+    for pairs in wanted:
+        for path, name in pairs:
+            files.setdefault(path, name)
+    records: dict[Path, dict] = {path: {"path": path} for path in files}
+    keep = keep and lib is not None
+    if keep:
         lib.hold()
-        kept = call_library(lib, "import", "--via=img2img.py", f"--repo={HERE}", "--", *map(str, a.images))
-        a.inputs = [{"id": k["id"], "path": Path(k["path"])} for k in kept]
-        lib.using([i["id"] for i in a.inputs])
-    else:
-        a.inputs = [{"path": p} for p in a.images]
-    prepared = prepare_inputs([i["path"] for i in a.inputs], workdir, a.names)
-    a.uploads = [p for p, _ in prepared]
-    a.upload_stems = [p.stem if how else name for (p, how), name in zip(prepared, a.names)]
-    if lib is not None:
-        for i, (path, how) in zip(a.inputs, prepared):
+        kept = lib.call("import", "--via=img2img.py", f"--repo={HERE}", "--", *map(str, files))
+        records = {path: {"id": k["id"], "path": Path(k["path"])} for path, k in zip(files, kept)}
+        lib.using([k["id"] for k in kept])
+    prepared = dict(zip(files, prepare_inputs([records[p]["path"] for p in files], workdir, list(files.values()))))
+    if keep:
+        for path, (upload, how) in prepared.items():
             if how:
                 info = json.dumps({"steps": how, "libs": decoder_versions()})
-                i["uploaded"] = call_library(lib, "rendition", i["id"], str(path), f"--info={info}")["uploaded"]
-
-
-def resolve_images(a: argparse.Namespace) -> None:
-    """Turns each @ID input into its file in the library, and sets a.names: the name of each input, used for the
-    result's name and the upload names (a file in the library is named after its rope name, not its hash)."""
-    a.names = []
-    for n, img in enumerate(a.images):
-        in_library = a.lib is not None and img.exists() and img.resolve().is_relative_to(a.lib.root)
-        if str(img).startswith("@") and not img.exists() or in_library:
-            if a.lib is None:
-                die(f"{img} names an image in rope, which this run does not use")
-            info = call_library(a.lib, "show", str(img))
-            a.images[n] = Path(info["path"])
-            a.names.append(info["name"] or info["short"])
-        else:
-            a.names.append(img.stem)
+                records[path]["uploaded"] = lib.call("rendition", records[path]["id"], str(upload), f"--info={info}")["uploaded"]
+    return [Inputs(names=[name for _, name in pairs], records=[records[path] for path, _ in pairs],
+                   uploads=[prepared[path][0] for path, _ in pairs],
+                   stems=[prepared[path][0].stem if prepared[path][1] else name for path, name in pairs])
+            for pairs in wanted]
 
 
 # ---------------------------------------------------------------- running jobs
 
 @dataclass
 class Job:
-    index: int
+    """One workflow in ComfyUI's queue: image `index` of a request, with its own seed."""
+
+    request: Request
+    inputs: Inputs
+    index: int  # which of the request's `count` images, from 1
     seed: int
     graph: Graph
+    label: str = ""  # the status line when it starts: "[3/6] seed 42", with "#2" before the seed among several requests
     started: float = 0.0
+    took: float = 0.0  # seconds from its start in ComfyUI to its result
     saved: list[str] = field(default_factory=list)  # where each result went, for the status line
+    results: list[Result] = field(default_factory=list)
+
+
+@dataclass
+class Run:
+    """What the jobs of one run share: the ComfyUI, the library, and what every recipe records."""
+
+    comfy: Comfy
+    lib: Library
+    options: Options
+    status: Status
+    keep: Callable[[Run, Job, bytes, str], str]  # keeps a result and says where it went: keep_result, or keep_replay
+    hashes: ModelHashes
+    when: time.struct_time = field(default_factory=time.localtime)
+    server_info: str = ""
+    env: dict = field(default_factory=dict)
+    code: dict = field(default_factory=dict)
+    prehash: Background | None = None  # hashing every job's model files, started before the GPU work
+
+    def models(self, nodes: dict) -> list[dict]:
+        """The model files of a workflow with their hashes, waiting for the hashes if they are still being computed."""
+        if self.prehash is not None:
+            if not self.prehash.done.is_set():
+                self.status.line("  waiting for the model files' hashes")
+            self.prehash.result()
+        return model_files(nodes, self.hashes)
 
 
 def png_size(data: bytes) -> tuple[int, int] | None:
@@ -893,10 +1079,10 @@ def png_size(data: bytes) -> tuple[int, int] | None:
     return None
 
 
-def run_name(a: argparse.Namespace, seed: int) -> str:
-    """<time>_<first image>_<model>_s<seed>: sorts by time, and the folders of one -n run share the time."""
-    stem = re.sub(r"[^\w.-]+", "_", a.stem)[:40].strip("_.") or "image"  # no spaces or shell characters; keeps CJK
-    return f"{time.strftime('%Y%m%d-%H%M%S', a.when)}_{stem}_{a.model}_s{seed}"
+def run_name(when: time.struct_time, stem: str, model: str, seed: int) -> str:
+    """<time>_<first image>_<model>_s<seed>: sorts by time, and the images of one run share the time."""
+    stem = re.sub(r"[^\w.-]+", "_", stem)[:40].strip("_.") or "image"  # no spaces or shell characters; keeps CJK
+    return f"{time.strftime('%Y%m%d-%H%M%S', when)}_{stem}_{model}_s{seed}"
 
 
 def exact(x: float) -> str:
@@ -904,24 +1090,25 @@ def exact(x: float) -> str:
     return str(int(x)) if x.is_integer() else repr(x)
 
 
-def image_flags(a: argparse.Namespace, seed: int) -> list[str]:
+def image_flags(r: Request, seed: int) -> list[str]:
     """Every flag that changes the image, as argv items: the seed is this image's own and every default is spelled
     out, so later changes to the defaults cannot change the result. A new image-affecting flag has to go here too."""
-    flags = [f"--model={a.model}"]
-    if a.model == "2511":
-        flags.append(f"--lightning={a.lightning}")
+    flags = [f"--model={r.model}"]
+    if r.model == "2511":
+        flags.append(f"--lightning={r.lightning}")
     else:
-        flags.append(f"--resolution={a.resolution}")
-        if a.enhance:
+        flags.append(f"--resolution={r.resolution}")
+        if r.enhance:
             flags.append("--enhance")
-    flags += [f"--steps={a.steps}", f"--cfg={exact(a.cfg)}", f"--seed={seed}"]
-    flags += [f"--lora={name}:{exact(strength)}" for name, strength in a.lora]
-    if a.negative:
-        flags.append(f"--negative={a.negative}")
+    flags += [f"--steps={r.steps}", f"--cfg={exact(r.cfg)}", f"--seed={seed}"]
+    flags += [f"--lora={name}:{exact(strength)}" for name, strength in r.lora]
+    if r.negative:
+        flags.append(f"--negative={r.negative}")
     return flags
 
 
-def collect(comfy: Comfy, pid: str, job: Job, entry: dict | None, a: argparse.Namespace, status: Status) -> None:
+def collect(run: Run, pid: str, job: Job, entry: dict | None) -> None:
+    comfy, status = run.comfy, run.status
     for _ in range(50):  # execution_success can arrive a moment before the history entry is written
         entry = entry or comfy.history(pid)
         if entry:
@@ -944,29 +1131,31 @@ def collect(comfy: Comfy, pid: str, job: Job, entry: dict | None, a: argparse.Na
     refs = (outputs.get(job.graph.image_out) or {}).get("images") or []
     if not refs:
         die("ComfyUI finished without returning an image")
-    took = f", {time.monotonic() - job.started:.1f}s" if job.started else ""
+    job.took = time.monotonic() - job.started if job.started else 0.0
+    took = f", {job.took:.1f}s" if job.started else ""
     for ref in refs:
         data = comfy.fetch(ref)
-        where = a.keep(a, job, data, enhanced, status)
+        where = run.keep(run, job, data, enhanced)
         size = png_size(data)
         status.line(f"  -> {where}" + (f"  {size[0]}x{size[1]}" if size else "") + took)
         job.saved.append(where)
 
 
-def wait(ws, comfy: Comfy, pending: dict[str, Job], total: int, a: argparse.Namespace, status: Status) -> None:
+def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
     import websocket
 
-    deadline = time.monotonic() + a.timeout
+    comfy, status, timeout = run.comfy, run.status, run.options.timeout
+    deadline = time.monotonic() + timeout
     while pending:
         if time.monotonic() > deadline:
-            die(f"gave up after {a.timeout}s; the job may still be running in ComfyUI")
+            die(f"gave up after {timeout}s; the job may still be running in ComfyUI")
         try:
             raw = ws.recv()
         except websocket.WebSocketTimeoutException:
             for pid in list(pending):  # quiet for a while: make sure no finish message was missed
                 entry = comfy.history(pid)
                 if entry is not None:
-                    collect(comfy, pid, pending.pop(pid), entry, a, status)
+                    collect(run, pid, pending.pop(pid), entry)
             continue
         except websocket.WebSocketConnectionClosedException:
             die("lost the connection to ComfyUI" + (f":\n{comfy.log_tail()}" if comfy.proc else ""))
@@ -981,7 +1170,7 @@ def wait(ws, comfy: Comfy, pending: dict[str, Job], total: int, a: argparse.Name
         node = data.get("node")
         if kind == "execution_start":
             job.started = time.monotonic()
-            status.line(f"[{job.index}/{total}] seed {job.seed}")
+            status.line(job.label)
         elif kind == "executing" and node in job.graph.labels:
             status.show(job.graph.labels[node])
         elif kind == "progress" and node in job.graph.labels:
@@ -993,72 +1182,144 @@ def wait(ws, comfy: Comfy, pending: dict[str, Job], total: int, a: argparse.Name
         elif kind == "execution_interrupted":
             die("the job was interrupted inside ComfyUI")
         elif kind == "execution_success" or (kind == "executing" and node is None):
-            collect(comfy, pid, pending.pop(pid), None, a, status)
+            collect(run, pid, pending.pop(pid), None)
 
 
-def describe(a: argparse.Namespace, base: int) -> str:
-    bits = [f"model {a.model}"]
-    if a.model == "2511":
-        bits.append(f"Lightning {a.lightning}-step" if a.lightning != "off" else "Lightning off")
+def describe(r: Request, base: int) -> str:
+    """A request's settings in a line: model, steps, cfg, its seeds from `base`, LoRAs."""
+    bits = [f"model {r.model}"]
+    if r.model == "2511":
+        bits.append(f"Lightning {r.lightning}-step" if r.lightning != "off" else "Lightning off")
     else:
-        bits.append(f"resolution {a.resolution or 'as input'}")
-        if a.enhance:
+        bits.append(f"resolution {r.resolution or 'as input'}")
+        if r.enhance:
             bits.append("prompt enhancer on")
-    bits += [f"{a.steps} steps", f"cfg {a.cfg:g}", f"seed {base}" + (f"-{base + a.count - 1}" if a.count > 1 else "")]
-    if a.lora:
-        bits.append("LoRA " + ", ".join(f"{name}:{strength:g}" for name, strength in a.lora))
-    return f"queued {a.count} job{'s' if a.count > 1 else ''}: " + ", ".join(bits)
+    bits += [f"{r.steps} steps", f"cfg {r.cfg:g}", f"seed {base}" + (f"-{base + r.count - 1}" if r.count > 1 else "")]
+    if r.lora:
+        bits.append("LoRA " + ", ".join(f"{name}:{strength:g}" for name, strength in r.lora))
+    return ", ".join(bits)
 
 
-def run_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
+def run_jobs(run: Run, requests: list[Request], all_inputs: list[Inputs]) -> list[Result]:
+    """Uploads the inputs, queues every image of every request, follows them, and keeps each result as it comes.
+    Ctrl-C, or a failure in one job, drops what is still queued and interrupts the running job."""
     import websocket
 
-    status = Status()
-    tag = fresh_tag("f") if a.fresh else ""
-    names = [comfy.upload(p, upload_name(p, s, tag)) for p, s in zip(a.uploads, a.upload_stems)]
-    system_prompt = comfy.enhancer_system_prompt() if a.enhance else None
-    base = a.seed if a.seed is not None else random.randrange(2**32)
-    a.when, a.server_info = time.localtime(), comfy.system_info()  # one time for all the folders of this run
-    a.upload_names, a.keep = names, keep_result
-    if a.lib is not None:
-        a.env, a.code = comfy_env(comfy), code_identity()
+    comfy, status = run.comfy, run.status
+    tag = fresh_tag("f") if run.options.fresh else ""
+    uploaded: dict[Path, str] = {}  # a file several requests share goes up once
+    for inputs in all_inputs:
+        for path, stem in zip(inputs.uploads, inputs.stems):
+            if path not in uploaded:
+                uploaded[path] = comfy.upload(path, upload_name(path, stem, tag))
+        inputs.uploaded = [uploaded[path] for path in inputs.uploads]
+    system_prompt = comfy.enhancer_system_prompt() if any(r.enhance for r in requests) else None
+    run.when, run.server_info = time.localtime(), comfy.system_info()  # one time for all the results of this run
+    run.env, run.code = comfy_env(comfy), code_identity()
+    total = sum(r.count for r in requests)
+    jobs: list[Job] = []
+    bases: list[int] = []
+    for n, (r, inputs) in enumerate(zip(requests, all_inputs), start=1):
+        base = r.seed if r.seed is not None else random.randrange(2**32)
+        bases.append(base)
+        which = f"#{n} " if len(requests) > 1 else ""
+        for i in range(r.count):
+            graph = build(r, inputs.uploaded, base + i, system_prompt)
+            jobs.append(Job(r, inputs, i + 1, base + i, graph, f"[{len(jobs) + 1}/{total}] {which}seed {base + i}"))
+    run.prehash = start_prehash(run.hashes, [job.graph.nodes for job in jobs])
     ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
-    jobs: dict[str, Job] = {}
+    pending: dict[str, Job] = {}
     try:
-        for i in range(a.count):
-            graph = build(a, names, base + i, system_prompt)
-            if i == 0:
-                a.models = start_model_files(a, graph.nodes)
-            jobs[comfy.queue(graph)] = Job(i + 1, base + i, graph)
-        print(describe(a, base))
-        pending = dict(jobs)
-        try:
-            wait(ws, comfy, pending, len(jobs), a, status)
-        except KeyboardInterrupt:
-            status.line("\ncancelling: dropping queued jobs and interrupting the running one")
+        for job in jobs:
+            pending[comfy.queue(job.graph)] = job
+        if len(requests) == 1:
+            status.line(f"queued {total} job{'s' if total > 1 else ''}: {describe(requests[0], bases[0])}")
+        else:
+            status.line(f"queued {total} jobs for {len(requests)} requests:")
+            for n, (r, inputs, base) in enumerate(zip(requests, all_inputs, bases), start=1):
+                tags = f", tags {', '.join(r.tags)}" if r.tags else ""
+                status.line(f"  #{n} {inputs.names[0]}: {describe(r, base)}{tags}")
+        wait(run, ws, pending, total)
+    except BaseException as e:
+        if pending:
+            what = "cancelling" if isinstance(e, KeyboardInterrupt) else "stopping"
+            status.line(f"\n{what}: dropping the queued jobs and interrupting the running one")
             comfy.cancel(list(pending))
-            raise
+        raise
     finally:
         ws.close()
-    return [p for job in jobs.values() for p in job.saved]
+    return [result for job in jobs for result in job.results]
+
+
+def with_comfy(opts: Options, work: Callable[[Comfy], list]) -> list:
+    """Runs `work` against the ComfyUI at opts.server, starting one for the duration if none answers there, and
+    reports how many images it made."""
+    comfy = Comfy(opts.server)
+    started = False
+    if not comfy.alive():
+        if opts.no_start:
+            die(f"no ComfyUI answers at {opts.server}; start it with {tilde(LAUNCHER)} or drop --no-start")
+        comfy.start(opts.comfy_args)
+        started = True
+    t0 = time.monotonic()
+    try:
+        made = work(comfy)
+    finally:
+        if started and opts.keep_server and comfy.proc.poll() is None:
+            print(f"ComfyUI keeps running at {opts.server} (pid {comfy.proc.pid}); stop it with: kill -INT {comfy.proc.pid}")
+        elif started:
+            print("stopping the ComfyUI this run started")
+            comfy.stop()
+    print(f"done: {len(made)} image{'' if len(made) == 1 else 's'} in {time.monotonic() - t0:.0f}s")
+    return made
+
+
+def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
+        no_start: bool = False, comfy_args: str | Iterable[str] = (), timeout: int = TIMEOUT, fresh: bool = False,
+        library: str | None = None) -> list[Result]:
+    """Makes the images of every request, all through one ComfyUI, and keeps them in rope. Returns a Result per
+    image: the requests in order, and each request's images in seed order.
+
+    Every request is checked first (a bad one is a ValueError), so nothing runs until all of them are good. Like
+    the command line, it prints what it does. A failure raises Error and drops the jobs still queued; Ctrl-C does
+    the same; what was made before stays in rope. The keyword arguments are the command line's ComfyUI and
+    --library options, with the same defaults:
+      server       the ComfyUI; if none answers there, one is started for this run and stopped afterwards
+      keep_server  leave a ComfyUI this run started running, so that the next run skips the model load
+      no_start     raise instead of starting a ComfyUI
+      comfy_args   extra flags for a ComfyUI this run starts, e.g. "--reserve-vram 2"
+      timeout      give up after this many seconds
+      fresh        compute again even when ComfyUI has cached the result of an identical workflow
+      library      the rope library; default $ROPE_LIBRARY, else ~/.local/share/rope
+    """
+    flags = shlex.split(comfy_args) if isinstance(comfy_args, str) else list(comfy_args)
+    opts = Options(server, keep_server, no_start, flags, timeout, fresh, library)
+    wanted = [requests] if isinstance(requests, Request) else list(requests)
+    settled = []
+    for n, r in enumerate(wanted, start=1):
+        try:
+            settled.append(r.settled())
+        except ValueError as e:
+            raise ValueError(f"request {n} of {len(wanted)}: {e}" if len(wanted) > 1 else str(e)) from None
+    if not settled:
+        return []
+    check_packages(PACKAGES)
+    lib = Library.find(opts.library)
+    for into in dict.fromkeys(r.into for r in settled if r.into):
+        # made now, so that a name rope refuses fails before the GPU work, and a typo shows up right here
+        if lib.call("mkdir", "-p", into)["created"]:
+            print(f"new rope folder {into}")
+    hashes = ModelHashes(lib.root / ".cache" / "model-sha256.json")
+    with tempfile.TemporaryDirectory(prefix="img2img-") as workdir:
+        all_inputs = prepare(settled, Path(workdir), lib)
+        return with_comfy(opts, lambda comfy: run_jobs(Run(comfy, lib, opts, Status(), keep_result, hashes),
+                                                       settled, all_inputs))
 
 
 # ---------------------------------------------------------------- cli
 
-def parse_lora(text: str) -> tuple[str, float]:
-    name, strength = text, 1.0
-    head, sep, tail = text.rpartition(":")
-    if sep:
-        try:
-            name, strength = head, float(tail)
-        except ValueError:
-            pass
-    if not re.search(r"\.(safetensors|ckpt|pt|pth|bin)$", name):
-        name += ".safetensors"
-    return name, strength
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    """The command line, with the Request it asks for as .request and the rest as .options and .dry_run."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("images", nargs="+", type=Path, metavar="IMAGE",
                    help="input images, or @ID for an image in rope; the first one sets the output size")
@@ -1083,7 +1344,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     g = p.add_argument_group("rope library", "Results go into the rope image library (see rope/README.md), and so does "
                              "every input, so that a result can be made again after its inputs are moved or deleted. "
                              "rope has to be built first.")
-    g.add_argument("--into", metavar="FOLDER", default=os.environ.get("IMG2IMG_INTO") or None,
+    g.add_argument("--into", metavar="FOLDER",
                    help="the rope folder for the results, e.g. trips/kyoto, made if there is none. "
                         "Default: $IMG2IMG_INTO, else unfiled")
     g.add_argument("--tag", dest="tags", action="append", default=[], metavar="TAG", help="tag the results; repeatable")
@@ -1094,30 +1355,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_comfy_args(g)
     g.add_argument("--dry-run", action="store_true", help="print the API workflow JSON and stop; nothing is uploaded or run")
     a = p.parse_args(argv)
-
-    for img in a.images:
-        if not img.is_file() and not (str(img).startswith("@") and not img.exists()):
-            p.error(f"no such image: {img}")
-    if len(a.images) > MAX_IMAGES[a.model]:
-        p.error(f"model {a.model} takes at most {MAX_IMAGES[a.model]} images")
-    if a.count < 1:
-        p.error("--count must be at least 1")
-    if a.model == "2511":
-        if a.resolution is not None or a.enhance:
-            p.error("--resolution and --enhance belong to Qwen-Image-2.1 (-m 2.1)")
-        a.lightning = a.lightning or "4"
-        fast = a.lightning != "off"
-        a.steps = a.steps or (int(a.lightning) if fast else 40)
-        a.cfg = a.cfg if a.cfg is not None else (1.0 if fast else 4.0)
-    else:
-        if a.lightning is not None:
-            p.error("--lightning belongs to Qwen-Image-Edit-2511")
-        a.resolution = 1024 if a.resolution is None else a.resolution
-        if not 0 <= a.resolution <= 4096:
-            p.error("--resolution takes 0 to 4096")
-        a.steps = a.steps or 25
-        a.cfg = a.cfg if a.cfg is not None else 1.0
-    a.comfy_args = shlex.split(a.comfy_args)
+    try:
+        a.request = Request(a.images, a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
+                            steps=a.steps, cfg=a.cfg, lora=a.lora, lightning=a.lightning, resolution=a.resolution,
+                            enhance=a.enhance, into=a.into, tags=a.tags, note=a.note).settled()
+    except ValueError as e:
+        p.error(str(e))
+    a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
     return a
 
 
@@ -1134,6 +1378,10 @@ def add_comfy_args(g) -> None:
                         "is always fresh")
 
 
+PACKAGES = {"websocket": "websocket-client", "PIL": "pillow", "pillow_heif": "pillow-heif",
+            "pillow_jxl": "pillow-jxl-plugin", "rawpy": "rawpy"}  # module -> package, as the header lists them
+
+
 def check_packages(needed: dict[str, str]) -> None:
     """Fail with a how-to instead of a ModuleNotFoundError when this Python lacks the script's packages."""
     import importlib.util
@@ -1145,52 +1393,30 @@ def check_packages(needed: dict[str, str]) -> None:
             f"{tilde(HERE / '.venv' / 'bin' / 'python')}, e.g. after: source {tilde(HERE / '.venv' / 'bin' / 'activate')}")
 
 
+def workflow(request: Request, seed: int = 0, *, fresh: bool = False, library: str | None = None) -> dict:
+    """The API workflow run() would send for this request and seed, which --dry-run prints: nothing is uploaded,
+    run or kept, and rope is only asked where @ID inputs are."""
+    r = request.settled()
+    check_packages(PACKAGES)
+    lib = Library.find(library) if any(rope_ref(i) for i in r.images) else None
+    with tempfile.TemporaryDirectory(prefix="img2img-") as workdir:
+        inputs = prepare([r], Path(workdir), lib, keep=False)[0]
+        tag = "f000000" if fresh else ""  # the real tag is random
+        names = [f"{UPLOAD_SUBFOLDER}/{upload_name(p, s, tag)}" for p, s in zip(inputs.uploads, inputs.stems)]
+        system_prompt = "<system prompt from ComfyUI's Qwen-Image-2.1 edit template>" if r.enhance else None
+        return build(r, names, seed, system_prompt).nodes
+
+
 def main(argv: list[str]) -> int:
     if any(arg == "--replay" or arg.startswith("--replay=") for arg in argv):
         return replay_main(argv)
     a = parse_args(argv)
-    check_packages({"websocket": "websocket-client", "PIL": "pillow", "pillow_heif": "pillow-heif",
-                    "pillow_jxl": "pillow-jxl-plugin", "rawpy": "rawpy"})
     sys.stdout.reconfigure(line_buffering=True)
-    # a dry run keeps nothing, so it needs rope only to look up @ID inputs
-    at_ids = any(str(i).startswith("@") and not i.exists() for i in a.images)
-    a.lib = Library.find(a) if not a.dry_run or at_ids else None
-    if a.into and not a.dry_run:
-        # made now, so that a name rope refuses fails before the GPU work, and a typo shows up right here
-        if call_library(a.lib, "mkdir", "-p", a.into)["created"]:
-            print(f"new rope folder {a.into}")
-    resolve_images(a)
-    a.stem = a.names[0]
-    with tempfile.TemporaryDirectory(prefix="img2img-") as workdir:
-        keep_inputs(a, Path(workdir))
-        if a.dry_run:
-            tag = "f000000" if a.fresh else ""  # the real tag is random
-            names = [f"{UPLOAD_SUBFOLDER}/{upload_name(p, s, tag)}" for p, s in zip(a.uploads, a.upload_stems)]
-            system_prompt = "<system prompt from ComfyUI's Qwen-Image-2.1 edit template>" if a.enhance else None
-            graph = build(a, names, a.seed if a.seed is not None else 0, system_prompt)
-            print(json.dumps(graph.nodes, indent=2, ensure_ascii=False))
-            return 0
-        return run(a, run_jobs)
-
-
-def run(a: argparse.Namespace, work) -> int:
-    comfy = Comfy(a.server)
-    started = False
-    if not comfy.alive():
-        if a.no_start:
-            die(f"no ComfyUI answers at {a.server}; start it with {tilde(LAUNCHER)} or drop --no-start")
-        comfy.start(a.comfy_args)
-        started = True
-    t0 = time.monotonic()
-    try:
-        saved = work(a, comfy)
-    finally:
-        if started and a.keep_server and comfy.proc.poll() is None:
-            print(f"ComfyUI keeps running at {a.server} (pid {comfy.proc.pid}); stop it with: kill -INT {comfy.proc.pid}")
-        elif started:
-            print("stopping the ComfyUI this command started")
-            comfy.stop()
-    print(f"done: {len(saved)} image{'' if len(saved) == 1 else 's'} in {time.monotonic() - t0:.0f}s")
+    if a.dry_run:
+        seed = a.request.seed if a.request.seed is not None else 0
+        print(json.dumps(workflow(a.request, seed, fresh=a.fresh, library=a.library), indent=2, ensure_ascii=False))
+        return 0
+    run(a.request, **vars(a.options))
     return 0
 
 
@@ -1222,8 +1448,7 @@ def parse_replay_args(argv: list[str]) -> argparse.Namespace:
     g = p.add_argument_group("ComfyUI")
     add_comfy_args(g)
     a = p.parse_args(argv)
-    a.comfy_args = shlex.split(a.comfy_args)
-    a.into, a.tags, a.note, a.count = None, [], None, 1
+    a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
     return a
 
 
@@ -1231,8 +1456,8 @@ def replay_main(argv: list[str]) -> int:
     a = parse_replay_args(argv)
     check_packages({"websocket": "websocket-client"})
     sys.stdout.reconfigure(line_buffering=True)
-    a.lib = Library.find(a)
-    info = call_library(a.lib, "show", a.replay)
+    a.lib = Library.find(a.library)
+    info = a.lib.call("show", a.replay)
     made = info["meta"].get("made")
     if not made:
         die(f"{info['short']} has no recipe: rope did not see it being made, so it cannot be replayed")
@@ -1243,7 +1468,7 @@ def replay_main(argv: list[str]) -> int:
     a.inputs = [{"id": i["id"], "uploaded": i.get("uploaded"), "path": Path(i["path"]), "recorded": i.get("upload")}
                 for i in info["inputs"]]
     a.lib.using([info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
-    a.today = parse_args([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt])
+    a.today = parse_args([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt]).request
     a.seed_used = a.seed if a.seed is not None else a.today.seed
     a.recorded = info.get("graph")
     if a.recorded is None:
@@ -1266,7 +1491,8 @@ def replay_main(argv: list[str]) -> int:
         nodes = replay_graph(a, [i["recorded"] or "" for i in a.inputs], "<system prompt from ComfyUI>")
         print(json.dumps(nodes, indent=2, ensure_ascii=False))
         return 0
-    return run(a, replay_jobs)
+    with_comfy(a.options, lambda comfy: replay_jobs(a, comfy))
+    return 0
 
 
 def replay_graph(a: argparse.Namespace, names: list[str], system_prompt: str | None) -> dict:
@@ -1368,34 +1594,36 @@ def env_changes(then: dict, now: dict, prefix: str = "") -> list[str]:
 def replay_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
     import websocket
 
-    status = Status()
+    run = Run(comfy, a.lib, a.options, Status(), lambda run, job, data, enhanced: keep_replay(a, run, job, data, enhanced),
+              ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
+    status = run.status
     tag = fresh_tag("r")
     names = []
     for i in a.inputs:
         stem = re.sub(r"^[0-9a-f]{12}_([rf][0-9a-f]{6}_)?", "", Path(i["recorded"] or i["path"].name).stem)
         names.append(comfy.upload(i["path"], upload_name(i["path"], stem, tag)))
-    a.when, a.server_info = time.localtime(), comfy.system_info()
-    a.env, a.code, a.upload_names, a.keep = comfy_env(comfy), code_identity(), names, keep_replay
+    run.server_info, run.env, run.code = comfy.system_info(), comfy_env(comfy), code_identity()
     env_id = a.made.get("env")
     if isinstance(env_id, str) and (a.lib.root / "envs" / f"{env_id}.json").exists():
         then = json.loads((a.lib.root / "envs" / f"{env_id}.json").read_text("utf-8"))
-        for line in env_changes(then, a.env):
+        for line in env_changes(then, run.env):
             print(f"  environment: {line}")
     system_prompt = comfy.enhancer_system_prompt() if a.today.enhance and (a.rebuild or a.recorded is None) else None
     nodes = replay_graph(a, names, system_prompt)
-    a.models = model_files(nodes, ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
+    run.prehash = start_prehash(run.hashes, [nodes])
     graph = Graph()
     graph.nodes = nodes
     graph.labels = {nid: REPLAY_LABELS[n["class_type"]] for nid, n in nodes.items() if n["class_type"] in REPLAY_LABELS}
     graph.image_out = next(nid for nid, n in nodes.items() if n["class_type"] == "PreviewImage")
     graph.text_out = next((nid for nid, n in nodes.items() if n["class_type"] == "PreviewAny"), "")
+    inputs = Inputs([a.info["name"]], a.inputs, [i["path"] for i in a.inputs], [], names)
+    job = Job(a.today, inputs, 1, a.seed_used, graph, f"[1/1] seed {a.seed_used}")
     ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
-    job = Job(1, a.seed_used, graph)
     try:
         pending = {comfy.queue(graph): job}
         print(f"replaying {a.info['short']} {a.info['name']}, seed {a.seed_used}")
         try:
-            wait(ws, comfy, pending, 1, a, status)
+            wait(run, ws, pending, 1)
         except KeyboardInterrupt:
             status.line("\ncancelling the replay")
             comfy.cancel(list(pending))
@@ -1405,16 +1633,16 @@ def replay_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
     return job.saved
 
 
-def keep_replay(a: argparse.Namespace, job: Job, data: bytes, enhanced: str, status: Status) -> str:
+def keep_replay(a: argparse.Namespace, run: Run, job: Job, data: bytes, enhanced: str) -> str:
     """Records a replay's result with the image it replays, and returns what came of it."""
     flags = image_flags(a.today, a.seed_used) if a.rebuild or a.recorded is None else \
         [f"--seed={a.seed_used}" if f.startswith("--seed=") else f for f in a.flags]
-    made = json.dumps(recipe(a, job, flags, enhanced or a.made.get("enhanced_prompt") or ""), ensure_ascii=False)
+    made = json.dumps(recipe(run, job, flags, enhanced or a.made.get("enhanced_prompt") or ""), ensure_ascii=False)
 
     def args(png: Path, made: Path, graph: Path) -> list[str]:
         return ["replayed", a.info["id"], str(png), f"--made={made}", f"--graph={graph}", f"--repo={HERE}"]
 
-    r = send_result(a, f"replay-{a.info['short']}", data, made, job, args, status)
+    r, _ = send_result(run, f"replay-{a.info['short']}", data, made, job, args)
     if r is None:
         return "not recorded in rope; see above"
     if r["result"] == "identical":
@@ -1426,6 +1654,8 @@ def keep_replay(a: argparse.Namespace, job: Job, data: bytes, enhanced: str, sta
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
+    except Error as e:
+        sys.exit(f"error: {e}")
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         sys.exit(130)

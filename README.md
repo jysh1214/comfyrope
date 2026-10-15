@@ -8,7 +8,7 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 through ComfyUI on this machine (RT
 | `install_comfyui.py` | Installs or updates ComfyUI with its own venv |
 | `download_models.py` | Downloads the model files from Hugging Face, and optional skin LoRAs |
 | `run_comfyui.sh` | Starts ComfyUI |
-| `img2img.py` | Makes a new image from input images and a prompt, through ComfyUI's API |
+| `img2img.py` | Makes a new image from input images and a prompt, through ComfyUI's API. Also a Python module, for running many combinations in one go |
 | `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
 
 Run every command from the repo root. Each script finds `ComfyUI/`, `models/` and `.venv/` next to itself, so the repo can live anywhere and be moved without reinstalling.
@@ -33,7 +33,7 @@ rope/target/release/rope-gui                            # browse the results
 ├── install_comfyui.py   # installs or updates ComfyUI (Python standard library only)
 ├── download_models.py   # downloads models from Hugging Face (run with uv, nothing to install first)
 ├── run_comfyui.sh       # starts ComfyUI (written by install_comfyui.py)
-├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API
+├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
 ├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
 │   ├── diffusion_models/
@@ -62,7 +62,7 @@ source .venv/bin/activate
 python img2img.py photo.jpg "把天空換成星空"
 ```
 
-`setup_venv.sh` uses uv to make a Python 3.12 `.venv`, installs the package lists from the two scripts, and checks each package imports. When a script gains a package, run it again; to rebuild from scratch, delete `.venv` first.
+`setup_venv.sh` uses uv to make a Python 3.12 `.venv`, installs the package lists from the two scripts, and checks each package imports. When a script gains a package, run it again; to rebuild from scratch, delete `.venv` first. A script of your own that does `import img2img` (see [From Python](#from-python)) needs the same packages, so run it with `.venv/bin/python` too.
 
 `python img2img.py` without activating `.venv` runs the system Python or ComfyUI's venv. Neither has these packages, so the script lists what is missing and how to run it instead. ComfyUI's own venv is `ComfyUI/.venv`, managed by `install_comfyui.py` and separate from `.venv`.
 
@@ -235,7 +235,7 @@ Give it images and a prompt and it makes a new image, with no UI. It flattens Co
 ./img2img.py photo.jpg "..." --dry-run                                # only print the API workflow JSON
 ```
 
-With `.venv` activated, `python img2img.py` works the same as `./img2img.py`.
+With `.venv` activated, `python img2img.py` works the same as `./img2img.py`. To try many settings in one go, [import it from Python](#from-python).
 
 Images come first and the prompt last; the first image sets the output size. With several images, refer to them in the prompt as 圖1, 圖2 or image 1, image 2, in command-line order. Prompts can be Chinese or English and work best as instructions that describe only the change: "replace … with …", "remove …", "add …".
 
@@ -316,6 +316,8 @@ To compare, run the same image and seed with and without, into one rope folder, 
 ./img2img.py photo.jpg "make the subjects skin details more prominent and natural" -s 42 --lightning 8 --lora qwen-edit-skin-1.1.safetensors --lora Skin_Fix_rank64.safetensors:0.8 --into tests/skin --tag both
 ```
 
+A whole grid of strengths and Lightning settings goes in one run [from Python](#from-python); the example there is this comparison.
+
 ### Options
 
 Generation:
@@ -355,6 +357,41 @@ ComfyUI:
 | `--comfy-args "..."` | Extra flags for a ComfyUI this command starts, e.g. `"--reserve-vram 2"` |
 | `--timeout N` | Give up after N seconds; default 1800 |
 | `--fresh` | Compute the image again even when ComfyUI has cached the result of an identical workflow (same inputs, settings and seed); the loaded models are kept. GPU results differ slightly from run to run, so a fresh run is a new image |
+
+### From Python
+
+`img2img.py` is also a module. `import img2img`, build a `Request` per combination to try, and `run()` makes them all in one go: through one ComfyUI (started once if none is running), each input uploaded once, and every result in rope with its recipe, so the combinations can be compared side by side in `rope-gui`. A `Request` has a field per option above, with the same names and defaults, and `dataclasses.replace` makes variants of one:
+
+```python
+# compare.py: the skin LoRAs at a few strengths, with the 4- and 8-step Lightning LoRA, on one seed
+import dataclasses, itertools
+import img2img
+
+base = img2img.Request(["photo.jpg"], "make the subjects skin details more prominent and natural", seed=42, into="tests/skin")
+skin, fix = "qwen-edit-skin-1.1.safetensors", "Skin_Fix_rank64.safetensors"
+requests = [dataclasses.replace(base, tags=["plain"])]
+for lightning, strength in itertools.product(["4", "8"], [0.8, 1.0, 1.2]):
+    requests.append(dataclasses.replace(base, lightning=lightning, lora=[(skin, strength)], tags=[f"L{lightning}", f"skin {strength}"]))
+requests.append(dataclasses.replace(base, lightning="8", lora=[(skin, 1.0), (fix, 0.8)], tags=["L8", "skin 1", "fix 0.8"]))
+
+for r in img2img.run(requests):
+    print(r.short, r.folder, r.request.lightning, r.request.lora, r.request.tags)
+```
+
+Run it from the repo root with `.venv/bin/python compare.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); from elsewhere, put the repo on `PYTHONPATH`.
+
+| Name | What it is |
+|---|---|
+| `Request(images, prompt, ...)` | `images`: paths or `@ID`s (a single one may be a plain string), `prompt`, then the options as fields: `model`, `count`, `seed`, `negative`, `steps`, `cfg`, `lora` (`[("style.safetensors", 0.8)]`, or `["style.safetensors:0.8"]` as on the command line), `lightning`, `resolution`, `enhance`, `into`, `tags`, `note`. `request.settled()` is a copy with the defaults filled in |
+| `run(requests, **options)` | Makes every request's images and returns a `Result` per image, the requests in order. The keyword arguments are the ComfyUI options and `library`, with the same names and defaults: `server`, `keep_server`, `no_start`, `comfy_args`, `timeout`, `fresh`, `library` |
+| `Result` | `id` and `short` (rope's id), `path`, `folder`, `created` (False when rope had these bytes already), `width`, `height`, `seconds`, `enhanced_prompt`, `seed`, `index` (which of the request's `count` images), and `request`, the settled Request it came from |
+| `workflow(request, seed=0)` | The API workflow `run()` would send, as `--dry-run` prints it |
+| `Error` | What a failed run raises. A bad `Request` is a `ValueError` instead, raised before anything runs |
+
+- Every request is checked before anything runs, so one typo fails the whole batch at once, before any input goes into rope or any GPU work.
+- It prints what the command line prints. A failure in one job stops the run and drops the jobs still queued; what was made before stays in rope. Ctrl-C does the same.
+- Fix the seed when comparing settings: a request without one draws its own random seed.
+- Identical requests (same inputs, settings and seed) are answered from ComfyUI's cache, as on the command line; `fresh=True` computes them again.
 
 ### Tips
 
