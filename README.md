@@ -6,7 +6,7 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 through ComfyUI on this machine (RT
 |---|---|
 | `setup_venv.sh` | Builds `.venv`, the Python environment for the scripts below |
 | `install_comfyui.py` | Installs or updates ComfyUI with its own venv |
-| `download_models.py` | Downloads the model files from Hugging Face |
+| `download_models.py` | Downloads the model files from Hugging Face, and optional skin LoRAs |
 | `run_comfyui.sh` | Starts ComfyUI |
 | `img2img.py` | Makes a new image from input images and a prompt, through ComfyUI's API |
 | `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
@@ -129,6 +129,7 @@ uv run download_models.py all                       # the default set for 2.1 an
 uv run download_models.py 2511                      # only Edit-2511
 uv run download_models.py 2.1 --prompt-enhancer i2i # 2.1 plus the i2i prompt enhancer
 uv run download_models.py all --limit-rate 5M       # limit the speed to 5 MiB/s
+uv run download_models.py 2511 --skin-loras edit-skin skin-fix   # the skin LoRAs; skin-fix needs $CIVITAI_TOKEN
 ```
 
 MODEL is `2.1`, `2511` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`).
@@ -145,6 +146,15 @@ MODEL is `2.1`, `2511` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-251
 | 2511 | `vae/qwen_image_vae` | 0.25 GB |
 | 2511 | `loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16` | 0.85 GB |
 
+### Skin LoRAs
+
+Not in the default set; `--skin-loras NAME…` adds them for 2511. How to use them is under [Skin LoRAs](#skin-loras-1) in the `img2img.py` section.
+
+| NAME | File | Size | From |
+|---|---|---|---|
+| `edit-skin` | `loras/qwen-edit-skin-1.1.safetensors` | 0.3 GB | Hugging Face, [tlennon-ie/qwen-edit-skin](https://huggingface.co/tlennon-ie/qwen-edit-skin): the 2750-step file of version 1.1, the one Civitai serves as v1.1, saved under a shorter name |
+| `skin-fix` | `loras/Skin_Fix_rank64.safetensors` | 0.6 GB | Civitai, [Skin Fix Qwen v2.0](https://civitai.com/models/2031296/skin-fix-qwen). Civitai refuses downloads without an API key: make one at https://civitai.com/user/account (API Keys, at the bottom) and pass `--civitai-token` or set `$CIVITAI_TOKEN`. The file is checked against its SHA-256 |
+
 ### Options
 
 | Option | Description |
@@ -157,11 +167,13 @@ MODEL is `2.1`, `2511` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-251
 | `--force` | Skip the free disk space check |
 | `--ipv6` | Allow IPv6. By default only IPv4 is used: huggingface.co has IPv6 addresses, and when local IPv6 is configured but broken, every request waits for the IPv6 attempt to time out before falling back |
 | `--token` | Hugging Face token, not needed for public repos; defaults to `$HF_TOKEN` |
+| `--civitai-token KEY` | Civitai API key, needed for the files that come from Civitai; defaults to `$CIVITAI_TOKEN` |
 | `--q21-precision int8\|bf16` | Precision of the 2.1 DiT and Qwen3-VL encoder; bf16 is 14.2 + 17.5 GB |
 | `--q21-variant base\|turbo` | 2.1 base (the template's default) or the distilled turbo model |
 | `--turbo-lora` | Also fetch the turbo LoRA for 2.1 base (0.9 GB) |
 | `--prompt-enhancer i2i t2i` | 2.1's Qwen3.5-9B prompt enhancers, 9.5 GB each |
 | `--edit-precision fp8\|int8\|bf16` | The 2511 model: fp8mixed (default) / int8_convrot / bf16 (40.9 GB, needs offloading) |
+| `--skin-loras NAME…` | Skin LoRAs for 2511: `edit-skin`, `skin-fix` (see above) |
 | `--lightning none\|4\|8\|both` | 2511's Lightning LoRAs; by default only the 4-step one |
 
 ### Behavior
@@ -174,7 +186,7 @@ MODEL is `2.1`, `2511` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-251
 
 ### Adding files
 
-The file lists are `plan_qwen_image_21()` and `plan_edit_2511()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on). Check with `--list` afterwards.
+The file lists are `plan_qwen_image_21()` and `plan_edit_2511()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on); `name=` saves the file under another name. A file that is not on Hugging Face takes `url=`, `size=` and `sha256=` instead, as the Civitai entry in `SKIN_LORAS` does; it is fetched over plain HTTP and checked against the hash. Check with `--list` afterwards.
 
 ## Starting ComfyUI: run_comfyui.sh
 
@@ -218,6 +230,8 @@ Give it images and a prompt and it makes a new image, with no UI. It flattens Co
 ./img2img.py photo.jpg "..." --lightning off --steps 20               # the full model at 20 steps, the template's value
 ./img2img.py photo.jpg "turn this into a watercolor painting" -m 2.1
 ./img2img.py photo.jpg "..." --lora my_style.safetensors:0.8 -s 42
+./img2img.py photo.jpg "make the subjects skin details more prominent and natural" --lora qwen-edit-skin-1.1.safetensors   # real skin texture
+./img2img.py photo.jpg "..." --lightning 8 --lora Skin_Fix_rank64.safetensors:0.8   # less plastic skin with the Lightning LoRA
 ./img2img.py photo.jpg "..." --dry-run                                # only print the API workflow JSON
 ```
 
@@ -284,6 +298,23 @@ Conversion applies the EXIF orientation and turns images with an ICC profile int
 | Steps and CFG | With the Lightning 4-step LoRA: 4 steps, CFG 1 | 25 steps, CFG 1 |
 | Output size | The first image scaled to about 1 MP | The first image scaled to about the area of 1024×1024 |
 | Its own options | `--lightning 4\|8\|off` | `--resolution N`, `--enhance` |
+
+### Skin LoRAs
+
+Qwen-Image-Edit with the Lightning LoRA tends to give smooth, plastic skin. Two LoRAs help; `uv run download_models.py 2511 --skin-loras edit-skin skin-fix` fetches them (see [Skin LoRAs](#skin-loras) under `download_models.py`), and `--lora` applies them, together or alone:
+
+| LoRA | What it does | How to use it |
+|---|---|---|
+| `qwen-edit-skin-1.1.safetensors` | Adds skin detail back: pores, texture, small imperfections. Trained on smoothed images as input and the originals as target, on Qwen-Image-Edit-2509; reported to work on 2511 | Strength 1 to 1.5 (its author says 2 is too much). Put its trigger in the prompt: `make the subjects skin details more prominent and natural`. At full strength it can leave blotches on plain backgrounds |
+| `Skin_Fix_rank64.safetensors` | Takes the plastic look off skin made with the Lightning LoRA. Its author says it does not make skin realistic, only less plastic | Strength 0.7 to 1.2, with the 8-step Lightning LoRA (`--lightning 8`); its author uses Lightning at 0.75. No trigger word. Trained for Qwen-Image, so results on Edit-2511 vary |
+
+To compare, run the same image and seed with and without, into one rope folder, and step through them in the large view:
+
+```bash
+./img2img.py photo.jpg "make the subjects skin details more prominent and natural" -s 42 --into tests/skin --tag plain
+./img2img.py photo.jpg "make the subjects skin details more prominent and natural" -s 42 --lora qwen-edit-skin-1.1.safetensors --into tests/skin --tag edit-skin
+./img2img.py photo.jpg "make the subjects skin details more prominent and natural" -s 42 --lightning 8 --lora qwen-edit-skin-1.1.safetensors --lora Skin_Fix_rank64.safetensors:0.8 --into tests/skin --tag both
+```
 
 ### Options
 

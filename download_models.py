@@ -3,7 +3,8 @@
 # requires-python = ">=3.11"
 # dependencies = ["huggingface_hub>=1.0,<3"]
 # ///
-"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 model files (ComfyUI repacks) from Hugging Face.
+"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 model files (ComfyUI repacks) from Hugging Face, and
+optional skin LoRAs for 2511 (one of them from Civitai, which needs an API key).
 
 Files land in a ComfyUI-style layout under --dest:
     <dest>/diffusion_models/   <dest>/text_encoders/   <dest>/vae/   <dest>/loras/
@@ -16,6 +17,7 @@ Examples:
     ./download_models.py all --prompt-enhancer i2i      # both models, plus 2.1's i2i prompt enhancer
     ./download_models.py all --limit-rate 5M            # cap at 5 MiB/s (k/M/G suffix, 1024-based)
     ./download_models.py 2.1 --q21-precision bf16 --only diffusion
+    ./download_models.py 2511 --skin-loras edit-skin skin-fix --only lora   # skin LoRAs; skin-fix needs $CIVITAI_TOKEN
 
 Downloads resume on re-run; a file already present with the right size is skipped.
 Without --limit-rate the hf_xet fast path is used; with it, a plain HTTP stream with
@@ -62,6 +64,7 @@ Q21 = "Comfy-Org/Qwen-Image-2.1"
 EDIT = "Comfy-Org/Qwen-Image-Edit_ComfyUI"
 QI = "Comfy-Org/Qwen-Image_ComfyUI"
 L2511 = "lightx2v/Qwen-Image-Edit-2511-Lightning"
+SKIN = "tlennon-ie/qwen-edit-skin"
 
 KIND_DIR = {
     "diffusion": "diffusion_models",
@@ -90,10 +93,34 @@ class F:
     path: str  # path inside the repo
     kind: str  # key of KIND_DIR
     approx_gb: float  # for --list only; the real size is fetched from the Hub
+    name: str | None = None  # the local file name, when it should differ from the repo's
+    url: str | None = None  # a direct download (Civitai) instead of the Hub; size and sha256 are then given here
+    size: int | None = None
+    sha256: str | None = None
 
     @property
     def basename(self) -> str:
-        return Path(self.path).name
+        return self.name or Path(self.path).name
+
+    @property
+    def on_hub(self) -> bool:
+        return self.url is None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.repo, self.path)
+
+
+# Skin LoRAs for Qwen-Image-Edit (2509/2511); see README.md, "Skin LoRAs".
+#   edit-skin: qwen-edit-skin 1.1 by TL_, the 2750-step file Civitai's v1.1 serves, under a shorter name
+#   skin-fix:  Skin Fix Qwen 2.0 by OgreLemonSoup, against the plastic look of the Lightning LoRA; Civitai only
+SKIN_LORAS = {
+    "edit-skin": F(SKIN, "qwen-edit-skin_1.1_000002750.safetensors", "lora", 0.30, name="qwen-edit-skin-1.1.safetensors"),
+    "skin-fix": F("civitai.com/models/2031296", "Skin_Fix_rank64.safetensors", "lora", 0.59,
+                  url="https://civitai.com/api/download/models/2369080?fileId=2259910", size=589940496,
+                  sha256="ce1ae6a9201526d85bffae50aaa76a98160d7c48aa1214e06029024e06a6ab8b"),
+}
+CIVITAI_KEYS = "https://civitai.com/user/account"  # where an API key is made (API Keys, at the bottom)
 
 
 # ---------------------------------------------------------------- manifests
@@ -132,6 +159,7 @@ def plan_edit_2511(a: argparse.Namespace) -> list[F]:
     steps = {"none": [], "4": ["4"], "8": ["8"], "both": ["4", "8"]}[a.lightning]
     for s in steps:
         files.append(F(L2511, f"Qwen-Image-Edit-2511-Lightning-{s}steps-V1.0-bf16.safetensors", "lora", 0.85))
+    files += [SKIN_LORAS[s] for s in a.skin_loras]
     return files
 
 
@@ -144,7 +172,7 @@ def full_catalog() -> list[F]:
                                     prompt_enhancer=["i2i", "t2i"])
             out += plan_qwen_image_21(ns)
     for prec in ("fp8", "int8", "bf16"):
-        out += plan_edit_2511(argparse.Namespace(edit_precision=prec, lightning="both"))
+        out += plan_edit_2511(argparse.Namespace(edit_precision=prec, lightning="both", skin_loras=list(SKIN_LORAS)))
     return dedupe(out)
 
 
@@ -180,10 +208,11 @@ def real_sizes(files: list[F], token: str | None) -> dict[tuple[str, str], int |
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
-    sizes: dict[tuple[str, str], int | None] = {}
+    sizes: dict[tuple[str, str], int | None] = {f.key: f.size for f in files if not f.on_hub}
     by_repo: dict[str, list[str]] = {}
     for f in files:
-        by_repo.setdefault(f.repo, []).append(f.path)
+        if f.on_hub:
+            by_repo.setdefault(f.repo, []).append(f.path)
     for repo, paths in by_repo.items():
         found = {info.path: getattr(info, "size", None) for info in api.get_paths_info(repo, paths=paths)}
         for p in paths:
@@ -199,6 +228,16 @@ def final_path(dest: Path, f: F) -> Path:
 
 def is_complete(path: Path, expected: int | None) -> bool:
     return path.exists() and (expected is None or path.stat().st_size == expected)
+
+
+def sha256_of(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------- download: fast path (hf_xet)
@@ -253,11 +292,12 @@ class _Throttle:
 
 
 def fetch_throttled(f: F, dest: Path, rate: int | None, token: str | None, expected: int | None) -> Path:
-    """Plain HTTP stream to <final>.part with Range resume; rate caps bytes/s, None means uncapped."""
+    """Plain HTTP stream to <final>.part with Range resume; rate caps bytes/s, None means uncapped. `token` is
+    the one for where `f` lives: the Hub, or Civitai for a file with a url."""
     from huggingface_hub import hf_hub_url
     from tqdm import tqdm
 
-    url = hf_hub_url(f.repo, f.path)
+    url = f.url or hf_hub_url(f.repo, f.path)
     final = final_path(dest, f)
     final.parent.mkdir(parents=True, exist_ok=True)
     part = final.with_name(final.name + ".part")
@@ -300,6 +340,9 @@ def fetch_throttled(f: F, dest: Path, rate: int | None, token: str | None, expec
             if expected is None:
                 break
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403) and not f.on_hub:
+                raise SystemExit(f"error: {f.repo} refused the download (HTTP {e.code}): Civitai needs an API key; "
+                                 f"make one at {CIVITAI_KEYS} and pass --civitai-token or set $CIVITAI_TOKEN") from e
             attempt += 1
             if attempt > RETRIES:
                 raise SystemExit(f"error: giving up on {f.basename} after {RETRIES} retries: {e}") from e
@@ -310,6 +353,10 @@ def fetch_throttled(f: F, dest: Path, rate: int | None, token: str | None, expec
     got = part.stat().st_size
     if expected is not None and got != expected:
         raise SystemExit(f"error: {f.basename} ended at {got} bytes, expected {expected}; re-run to resume")
+    if f.sha256 and (got_sha := sha256_of(part)) != f.sha256:
+        part.unlink()
+        raise SystemExit(f"error: {f.basename} does not match its SHA-256 (got {got_sha[:12]}…, expected "
+                         f"{f.sha256[:12]}…); the download was discarded, re-run to try again")
     if final.exists():
         final.unlink()
     os.replace(part, final)
@@ -335,6 +382,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="allow IPv6 (default: IPv4 only; a half-working v6 stack stalls every HF request)")
     p.add_argument("--token", default=os.environ.get("HF_TOKEN"),
                    help="Hugging Face token (public repos need none; default: $HF_TOKEN)")
+    p.add_argument("--civitai-token", default=os.environ.get("CIVITAI_TOKEN"), metavar="KEY",
+                   help=f"Civitai API key, needed for the files that come from Civitai (default: $CIVITAI_TOKEN); "
+                        f"make one at {CIVITAI_KEYS}")
 
     g = p.add_argument_group("Qwen-Image-2.1")
     g.add_argument("--q21-precision", choices=["int8", "bf16"], default="int8",
@@ -350,6 +400,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="fp8mixed (default, 20.5 GB) | int8_convrot (20.5 GB) | bf16 (40.9 GB, needs offload)")
     g.add_argument("--lightning", choices=["none", "4", "8", "both"], default="4",
                    help="Lightning LoRA steps to fetch (0.85 GB each; default 4)")
+    g.add_argument("--skin-loras", nargs="*", choices=list(SKIN_LORAS), default=[], metavar="NAME",
+                   help="skin LoRAs for 2511: edit-skin (qwen-edit-skin 1.1, 0.3 GB, Hugging Face), skin-fix "
+                        "(Skin Fix Qwen 2.0, 0.6 GB, Civitai: needs --civitai-token); see README.md, Skin LoRAs")
     return p.parse_args(argv)
 
 
@@ -416,6 +469,11 @@ def main(argv: list[str]) -> int:
     if not todo:
         print("nothing to do")
         return 0
+    civitai = [f for f in todo if not f.on_hub]
+    if civitai and not a.civitai_token:
+        names = ", ".join(f.basename for f in civitai)
+        sys.exit(f"error: {names} comes from Civitai, which needs an API key for downloads: make one at {CIVITAI_KEYS} "
+                 f"(API Keys, at the bottom) and pass --civitai-token or set $CIVITAI_TOKEN")
 
     dest.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(dest).free
@@ -425,7 +483,9 @@ def main(argv: list[str]) -> int:
     for i, f in enumerate(todo, 1):
         print(f"\n[{i}/{len(todo)}] {f.repo}/{f.path}")
         t0 = time.monotonic()
-        if a.limit_rate:
+        if not f.on_hub:  # Civitai: no xet, always the plain-HTTP path, capped only with --limit-rate
+            out = fetch_throttled(f, dest, a.limit_rate, a.civitai_token, sizes[(f.repo, f.path)])
+        elif a.limit_rate:
             out = fetch_throttled(f, dest, a.limit_rate, a.token, sizes[(f.repo, f.path)])
         else:
             out = None

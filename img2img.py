@@ -91,6 +91,8 @@ FETCH = {  # model file -> the command that downloads it
     LIGHTNING["8"]: "uv run download_models.py 2511 --lightning 8",
     **dict.fromkeys([Q21["unet"], Q21["clip"], Q21["vae"]], "uv run download_models.py 2.1"),
     Q21["pe"]: "uv run download_models.py 2.1 --prompt-enhancer i2i",
+    "qwen-edit-skin-1.1.safetensors": "uv run download_models.py 2511 --skin-loras edit-skin",
+    "Skin_Fix_rank64.safetensors": "uv run download_models.py 2511 --skin-loras skin-fix  # needs $CIVITAI_TOKEN",
 }
 MAX_IMAGES = {"2511": 3, "2.1": 10}  # 2.1: what its template exposes and its model card states
 PE_TEMPLATE = "image_qwen_image_2_1_image_edit.json"  # ComfyUI's 2.1 edit template holds the enhancer's system prompt
