@@ -75,6 +75,7 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 │   ├── note.txt
 │   └── uploaded/        # for HEIC, RAW and the like: the PNG actually uploaded in its place
 ├── tmp/                 # items being assembled, renamed into items/ when complete
+├── runs/<pid>.json      # the images each img2img.py run in progress uses; the run keeps it locked
 ├── rescue/              # results img2img.py could not hand to rope, waiting for rope add
 └── .cache/thumbs/       # GUI thumbnails; safe to delete
 ```
@@ -219,7 +220,7 @@ When things go wrong:
 
 - **rope is not built, or the library cannot be opened:** `img2img.py` stops before uploading or running anything.
 - **rope cannot take a result** (a full disk, say): the GPU work is not lost. The PNG goes to `rescue/` in the library (or the system's temp folder when even that fails) with its `made.json` and `graph.json`, next to a `bring-in.sh` that hands it to rope once rope works again. `rope check` lists what is still waiting in `rescue/`.
-- **Several runs at once:** each run holds `run.lock` while it lasts, so `rope purge` cannot delete an input that a running job uses.
+- **Several runs at once:** each run records the images it uses in `runs/<pid>.json` and keeps that file locked while it lasts, so `rope purge` leaves those alone and deletes anything else. A file left by a crashed run is removed once nothing holds its lock.
 
 ## Reproducing an image
 
@@ -246,7 +247,7 @@ Copy repro and `rope repro ID` both give `img2img.py --replay ID`. Each image's 
    - An image that other images were made from keeps only its file (and `uploaded/`). Its name, sources, recipe, note, folder and tags go, but the images made from it can still be replayed.
    - It goes for good when the last image made from it is purged.
    - `--break-lineage` deletes the bytes too; the images made from it can then no longer be replayed.
-3. **Purge refuses while `img2img.py` runs**, so it cannot delete an input in use.
+3. **While `img2img.py` runs, purge leaves that run's inputs alone** and says so; everything else is deleted as usual. Purge them again when the run is done.
 
 rope deletes only what is in the library: never the originals, or ComfyUI's `input/`.
 

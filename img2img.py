@@ -492,8 +492,11 @@ class LibraryError(Exception):
 
 class Library:
     """The rope library this run keeps its inputs and results in (see rope/README.md). Every change goes through
-    the rope command. This script only holds the library's run.lock, shared, from keeping its inputs to the end of
-    the run, so that `rope purge` cannot delete an input that a result of this run will name."""
+    the rope command. This script only takes two locks: run.lock, shared, while it brings its inputs in, and then
+    its own runs/<pid>.json, which names those inputs, until it ends. `rope purge` leaves the images named in a
+    locked runs file alone, since a result of that run will be made from them, and deletes anything else."""
+
+    run_file = None  # this process's runs/<pid>.json, open and locked; one per process, whatever made the Library
 
     def __init__(self, exe: str, flags: list[str]) -> None:
         self.exe, self.flags = exe, flags
@@ -525,12 +528,48 @@ class Library:
         return json.loads(r.stdout) if r.stdout.strip() else None
 
     def hold(self) -> None:
-        """Holds run.lock shared until this process ends."""
+        """Holds run.lock shared, until `using` records what this run uses: purge waits for that, so an input
+        cannot go between being brought in and being recorded."""
         import fcntl
 
         if self.run_lock is None:
             self.run_lock = open(self.root / "run.lock", "a")
             fcntl.flock(self.run_lock, fcntl.LOCK_SH)
+
+    def using(self, ids: list[str]) -> None:
+        """Records the images this run uses in runs/<pid>.json, locked until this process ends, and lets go of
+        run.lock. The file goes when the process ends normally; after a crash, rope removes it on seeing that
+        nothing holds its lock."""
+        import atexit
+        import fcntl
+
+        self.hold()
+        if Library.run_file is None:
+            (self.root / "runs").mkdir(exist_ok=True)
+            f = open(self.root / "runs" / f"{os.getpid()}.json", "a+")  # not "w": a file left by a dead run is reused
+            fcntl.flock(f, fcntl.LOCK_EX)
+            Library.run_file = f
+            atexit.register(Library.done)
+        f = Library.run_file
+        f.seek(0)
+        f.truncate()
+        command = shlex.join([Path(sys.argv[0]).name, *sys.argv[1:]])
+        record = {"pid": os.getpid(), "started": iso(time.localtime()), "inputs": ids, "command": command}
+        f.write(json.dumps(record, ensure_ascii=False))
+        f.flush()
+        self.run_lock.close()
+        self.run_lock = None
+
+    @staticmethod
+    def done() -> None:
+        """Removes this process's runs file; its lock goes with the file handle."""
+        if Library.run_file is not None:
+            try:
+                os.unlink(Library.run_file.name)
+            except OSError:
+                pass
+            Library.run_file.close()
+            Library.run_file = None
 
 
 def call_library(lib: Library, *args: str):
@@ -806,6 +845,7 @@ def keep_inputs(a: argparse.Namespace, workdir: Path) -> None:
         lib.hold()
         kept = call_library(lib, "import", "--via=img2img.py", f"--repo={HERE}", "--", *map(str, a.images))
         a.inputs = [{"id": k["id"], "path": Path(k["path"])} for k in kept]
+        lib.using([i["id"] for i in a.inputs])
     else:
         a.inputs = [{"path": p} for p in a.images]
     prepared = prepare_inputs([i["path"] for i in a.inputs], workdir, a.names)
@@ -1200,6 +1240,7 @@ def replay_main(argv: list[str]) -> int:
     a.info, a.made, a.prompt, a.flags = info, made, made.get("prompt", ""), made.get("flags", [])
     a.inputs = [{"id": i["id"], "uploaded": i.get("uploaded"), "path": Path(i["path"]), "recorded": i.get("upload")}
                 for i in info["inputs"]]
+    a.lib.using([info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
     a.today = parse_args([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt])
     a.seed_used = a.seed if a.seed is not None else a.today.seed
     a.recorded = info.get("graph")

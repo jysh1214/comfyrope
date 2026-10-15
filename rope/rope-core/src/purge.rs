@@ -3,10 +3,13 @@
 //! Deleting an image that others were made from would leave them impossible to replay. So by default such an
 //! image keeps its bytes (and the converted files uploaded in its place) and loses everything else: name,
 //! sources, recipe, note, folder, tags. It goes for good once the last image made from it is purged.
+//!
+//! An image that a running img2img.py uses (see `runs`) is left alone: its result, not in the library yet, will
+//! be made from it.
 
 use crate::catalog::Catalog;
 use crate::hash::short;
-use crate::{Library, Meta, atomic, journal, store, time};
+use crate::{Library, Meta, atomic, journal, runs, store, time};
 use anyhow::{Result, bail};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
@@ -17,13 +20,17 @@ pub struct Purged {
     pub deleted: Vec<String>,
     /// Images whose bytes stay, with the images made from them.
     pub kept: Vec<(String, Vec<String>)>,
+    /// Images left as they are: a running img2img.py uses them, the pid says which.
+    pub in_use: Vec<(String, u32)>,
 }
 
-/// Purges `ids`. With `break_lineage`, images others were made from go too, and those can no longer be replayed.
+/// Purges `ids`, except those a running img2img.py uses. With `break_lineage`, images others were made from go
+/// too, and those can no longer be replayed.
 pub fn purge(lib: &Library, ids: &[String], break_lineage: bool) -> Result<Purged> {
     let Some(_run) = lib.try_run_lock()? else {
-        bail!("img2img.py is running; purge again when it is done, since it could delete an input that run uses");
+        bail!("an img2img.py run is bringing its inputs in; purge again in a moment");
     };
+    let busy = runs::in_use(lib)?;
     let _lock = lib.lock()?;
     let (metas, problems) = store::scan(lib)?;
     if !problems.is_empty() {
@@ -33,17 +40,24 @@ pub fn purge(lib: &Library, ids: &[String], break_lineage: bool) -> Result<Purge
         );
     }
     let known: HashSet<&str> = metas.iter().map(|m| m.sha256.as_str()).collect();
-    let targets: HashSet<String> = ids.iter().cloned().collect();
-    for id in &targets {
+    let mut out = Purged::default();
+    let mut targets: HashSet<String> = HashSet::new();
+    for id in ids {
         if !known.contains(id.as_str()) {
             bail!("no image {} in rope", short(id));
+        }
+        match busy.get(id) {
+            Some(&pid) if !out.in_use.iter().any(|(i, _)| i == id) => out.in_use.push((id.clone(), pid)),
+            Some(_) => {}
+            None => {
+                targets.insert(id.clone());
+            }
         }
     }
     let staying: Vec<Meta> = metas.iter().filter(|m| !targets.contains(&m.sha256)).cloned().collect();
     let users = users_of(&staying);
 
     let mut catalog = Catalog::load(lib)?;
-    let mut out = Purged::default();
     let mut order: Vec<&String> = targets.iter().collect();
     order.sort();
     for id in order {
@@ -65,7 +79,7 @@ pub fn purge(lib: &Library, ids: &[String], break_lineage: bool) -> Result<Purge
         let users = users_of(&metas);
         let orphans: Vec<String> = metas
             .iter()
-            .filter(|m| m.kept.is_some() && !users.contains_key(m.sha256.as_str()))
+            .filter(|m| m.kept.is_some() && !users.contains_key(m.sha256.as_str()) && !busy.contains_key(&m.sha256))
             .map(|m| m.sha256.clone())
             .collect();
         if orphans.is_empty() {

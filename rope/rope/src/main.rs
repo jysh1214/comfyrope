@@ -921,17 +921,24 @@ fn purge_cmd(lib: &Library, json: bool, ids: &[String], trash: bool, force: bool
         shas
     };
     if shas.is_empty() {
-        return emit(json, json!({"deleted": [], "kept": []}), || println!("the trash is empty"));
+        return emit(json, json!({"deleted": [], "kept": [], "in_use": []}), || println!("the trash is empty"));
     }
     let out = purge::purge(lib, &shas, break_lineage)?;
     let kept: Vec<Value> = out.kept.iter().map(|(k, f)| json!({"id": k, "for": f})).collect();
-    emit(json, json!({"deleted": out.deleted, "kept": kept}), || {
+    let in_use: Vec<Value> = out.in_use.iter().map(|(k, pid)| json!({"id": k, "pid": pid})).collect();
+    emit(json, json!({"deleted": out.deleted, "kept": kept, "in_use": in_use}), || {
         println!("deleted {} image(s)", out.deleted.len());
         for (k, f) in &out.kept {
             println!(
                 "kept the bytes of {}: {} image(s) were made from it (rope purge --break-lineage to delete it anyway)",
                 short(k),
                 f.len()
+            );
+        }
+        for (k, pid) in &out.in_use {
+            println!(
+                "left {} alone: the img2img.py run with pid {pid} uses it; purge it when that run is done",
+                short(k)
             );
         }
     })

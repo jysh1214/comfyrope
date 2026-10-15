@@ -9,7 +9,8 @@
 //! journal.jsonl        one line per change, only ever appended; the GUI follows it
 //! REPO                 where the img2img repo was last seen, for repro.sh
 //! .lock                flock held around every metadata change
-//! run.lock             img2img.py holds it shared for a whole run; purge takes it exclusive
+//! run.lock             img2img.py holds it shared while it brings its inputs in; purge takes it exclusive
+//! runs/<pid>.json      the images each img2img.py run in progress uses, locked by it while it lasts
 //! envs/<id>.json       environment snapshots, one per distinct environment
 //! items/ab/<sha256>/   one image: <sha12>.<ext> (read-only), meta.json, graph.json, repro.sh, note.txt, uploaded/
 //! tmp/                 items being assembled; a complete one is renamed into items/
@@ -26,6 +27,7 @@ pub mod lineage;
 pub mod meta;
 pub mod purge;
 pub mod repro;
+pub mod runs;
 pub mod store;
 pub mod time;
 

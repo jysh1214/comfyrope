@@ -1283,11 +1283,17 @@ impl App {
                             let lib = app.lib.clone();
                             std::thread::spawn(move || {
                                 let r = purge::purge(&lib, &ids, false).map_err(|e| format!("{e:#}")).map(|p| {
-                                    format!(
-                                        "deleted {} image(s); kept the bytes of {} for their descendants",
-                                        p.deleted.len(),
-                                        p.kept.len()
-                                    )
+                                    let mut s = format!("deleted {} image(s)", p.deleted.len());
+                                    if !p.kept.is_empty() {
+                                        s += &format!("; kept the bytes of {} for their descendants", p.kept.len());
+                                    }
+                                    if !p.in_use.is_empty() {
+                                        s += &format!(
+                                            "; left {} that a running img2img.py uses (delete them for good when it is done)",
+                                            p.in_use.len()
+                                        );
+                                    }
+                                    s
                                 });
                                 let _ = tx.send(r);
                             });

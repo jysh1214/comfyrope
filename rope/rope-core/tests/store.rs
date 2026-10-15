@@ -159,7 +159,7 @@ fn purge_with_break_lineage_deletes_an_input_all_the_same() {
 }
 
 #[test]
-fn purge_waits_for_a_running_img2img() {
+fn purge_waits_while_a_run_brings_its_inputs_in() {
     let (dir, lib) = library();
     let a = import(&lib, &png(dir.path(), "a.png", 1));
     let run = fs::File::create(lib.root().join("run.lock")).unwrap();
@@ -167,6 +167,25 @@ fn purge_waits_for_a_running_img2img() {
     assert!(purge::purge(&lib, std::slice::from_ref(&a), false).is_err());
     drop(run);
     purge::purge(&lib, &[a], false).unwrap();
+}
+
+#[test]
+fn purge_leaves_the_inputs_of_a_running_img2img_alone_and_deletes_the_rest() {
+    let (dir, lib) = library();
+    let a = import(&lib, &png(dir.path(), "a.png", 1));
+    let b = import(&lib, &png(dir.path(), "b.png", 2));
+    let path = lib.runs_dir().join("777.json");
+    fs::write(&path, format!(r#"{{"pid": 777, "inputs": ["{a}"]}}"#)).unwrap();
+    let held = fs::File::open(&path).unwrap();
+    held.lock().unwrap();
+    let out = purge::purge(&lib, &[a.clone(), b.clone()], false).unwrap();
+    assert_eq!(out.deleted, std::slice::from_ref(&b));
+    assert_eq!(out.in_use, [(a.clone(), 777)]);
+    assert!(lib.item_dir(&a).exists() && !lib.item_dir(&b).exists());
+    drop(held);
+    let out = purge::purge(&lib, std::slice::from_ref(&a), false).unwrap();
+    assert_eq!((out.deleted, out.in_use), (vec![a.clone()], vec![]));
+    assert!(!path.exists(), "the file of the run that ended is gone");
 }
 
 #[test]

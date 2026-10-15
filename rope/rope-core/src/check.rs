@@ -2,7 +2,7 @@
 
 use crate::catalog::Catalog;
 use crate::hash::{self, short};
-use crate::{Library, journal, store};
+use crate::{Library, journal, runs, store};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::fs;
@@ -103,6 +103,10 @@ pub fn check(lib: &Library, hash: bool, fix: bool) -> Result<Report> {
         catalog.save(lib)?;
         journal::append(lib, "check", &[])?;
     }
+
+    // the files of img2img.py runs that ended are swept whenever they are read; here it is reported
+    let (_, swept) = runs::scan(lib)?;
+    r.fixed.extend(swept.into_iter().map(|f| format!("removed runs/{f}, left by an img2img.py run that has ended")));
 
     if let Ok(entries) = fs::read_dir(lib.root().join("rescue")) {
         for e in entries.flatten().filter(|e| e.path().is_dir()) {

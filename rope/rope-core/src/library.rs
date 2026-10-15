@@ -74,7 +74,7 @@ impl Library {
         if root.exists() && fs::read_dir(root)?.next().is_some() {
             bail!("{} exists and is not empty; rope makes a library only in an empty or new directory", root.display());
         }
-        for dir in ["items", "tmp", "envs", ".cache"] {
+        for dir in ["items", "tmp", "envs", "runs", ".cache"] {
             fs::create_dir_all(root.join(dir)).with_context(|| format!("cannot create {}", root.display()))?;
         }
         let marker = serde_json::json!({"format": FORMAT, "created": time::now()});
@@ -104,6 +104,10 @@ impl Library {
         self.root.join("tmp")
     }
 
+    pub fn runs_dir(&self) -> PathBuf {
+        self.root.join("runs")
+    }
+
     pub fn envs_dir(&self) -> PathBuf {
         self.root.join("envs")
     }
@@ -128,8 +132,9 @@ impl Library {
         Ok(Lock { _file: file })
     }
 
-    /// The run lock, exclusive and without waiting: `None` while an img2img.py run holds it shared. Purge takes
-    /// it, so that it cannot delete an input that a running job has captured but not yet linked to its result.
+    /// The run lock, exclusive and without waiting: `None` while an img2img.py run holds it shared, which it does
+    /// from bringing its inputs in to recording them in `runs/` (see `runs`). Purge holds it, so that no run can
+    /// slip its inputs in between purge reading `runs/` and deleting.
     pub fn try_run_lock(&self) -> Result<Option<Lock>> {
         let file = self.lock_file("run.lock")?;
         match file.try_lock() {
