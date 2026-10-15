@@ -250,6 +250,9 @@ impl App {
         if self.visible_for.as_ref() != Some(&key) {
             self.visible = self.model().view(&self.view, &self.search);
             self.visible_for = Some(key);
+            if let Some(v) = self.viewer.as_mut() {
+                v.admit(&self.visible);
+            }
         }
     }
 
@@ -1660,6 +1663,23 @@ mod tests {
         assert_eq!(app.viewer.as_ref().unwrap().zoom, None);
         press(&ctx, &mut app, egui::Key::I);
         frames_until(&ctx, &mut app, |a| a.viewer.as_ref().is_some_and(|v| v.info));
+
+        // an image added meanwhile (an img2img.py run finishing) can be stepped to: it enters the order where
+        // the view puts it (first, unless added in the same second as the others, which sorts by id)
+        let d = store::add(&lib, &png(dir.path(), "4.png", 4), &new()).unwrap().sha;
+        frames_until(&ctx, &mut app, |a| a.visible.len() == 4);
+        assert_eq!(app.viewer.as_ref().unwrap().order, app.visible);
+        assert_eq!(app.viewer.as_ref().unwrap().id, order[0]);
+        let place = |v: &[String], id: &String| v.iter().position(|i| i == id).unwrap() as isize;
+        let by = place(&app.visible, &d) - place(&app.visible, &order[0]);
+        for _ in 0..by.abs() {
+            press(&ctx, &mut app, if by > 0 { egui::Key::ArrowRight } else { egui::Key::ArrowLeft });
+        }
+        assert_eq!(app.viewer.as_ref().unwrap().id, d);
+        press(&ctx, &mut app, egui::Key::Delete);
+        assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&d));
+        frames_until(&ctx, &mut app, |a| a.visible.len() == 3);
+        app.apply(Action::Look(order[0].clone()), Some(&ctx));
 
         // Delete trashes the image and goes on to the next one
         press(&ctx, &mut app, egui::Key::Delete);

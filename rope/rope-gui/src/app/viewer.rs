@@ -6,6 +6,7 @@ use super::{Action, App, Dialog};
 use crate::model::View;
 use crate::thumbs::{self, Key, Source};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Vec2};
+use std::collections::{HashMap, HashSet};
 
 pub(super) struct Viewer {
     pub id: String,
@@ -17,13 +18,41 @@ pub(super) struct Viewer {
     pub info: bool,
     /// The zoom that fits the image to the window, as last drawn.
     pub fit: f32,
-    /// The view's order when the viewer opened. Stepping follows it, so that marking a favorite, which moves the
-    /// image to the front of the view, does not change which image comes next.
+    /// The view's order when the viewer opened, plus what has entered the view since (see `admit`). Stepping
+    /// follows it, so that marking a favorite, which moves the image to the front of the view, does not change
+    /// which image comes next.
     pub order: Vec<String>,
 }
 
 /// How far one press of + or - zooms.
 const STEP: f32 = 1.25;
+
+impl Viewer {
+    /// Takes into the order the images of `visible` that are not in it yet: the results of an img2img.py run
+    /// that finished while looking, an import, an image restored from the trash. Each goes right before the
+    /// image that follows it in the view, or at the end, so the order of the rest stays as it was.
+    pub fn admit(&mut self, visible: &[String]) {
+        let at: HashMap<&String, usize> = self.order.iter().enumerate().map(|(i, id)| (id, i)).collect();
+        if visible.iter().all(|id| at.contains_key(id)) {
+            return;
+        }
+        // before[i]: the newcomers to put before order[i], each group in reverse; before[len] goes at the end
+        let mut before: Vec<Vec<&String>> = vec![Vec::new(); self.order.len() + 1];
+        let mut next = self.order.len();
+        for id in visible.iter().rev() {
+            match at.get(id) {
+                Some(&i) => next = i,
+                None => before[next].push(id),
+            }
+        }
+        let mut order = Vec::with_capacity(visible.len().max(self.order.len()));
+        for (i, group) in before.iter().enumerate() {
+            order.extend(group.iter().rev().map(|id| (*id).clone()));
+            order.extend(self.order.get(i).cloned());
+        }
+        self.order = order;
+    }
+}
 
 impl App {
     /// Opens the viewer on `id`.
@@ -55,7 +84,7 @@ impl App {
     /// The viewer's order, without the images that have left the view since (trashed, say).
     fn order(&self) -> Vec<&String> {
         let Some(v) = &self.viewer else { return Vec::new() };
-        let shown: std::collections::HashSet<&String> = self.visible.iter().collect();
+        let shown: HashSet<&String> = self.visible.iter().collect();
         v.order.iter().filter(|id| shown.contains(id)).collect()
     }
 

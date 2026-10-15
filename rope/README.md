@@ -162,7 +162,7 @@ The window runs on its own: the command returns at once, and closing the termina
 
 | Key or mouse | Action |
 |---|---|
-| ← → (or ↑ ↓, Space) | Previous / next image of the view |
+| ← → (or ↑ ↓, Space) | Previous / next image of the view. Images that arrive while looking (an `img2img.py` run finishing, an import) join in, where the view puts them |
 | Ctrl+wheel | Zoom around the cursor |
 | Drag | Pan, when zoomed |
 | Double-click, 1 | 100%: one image pixel per screen pixel |
