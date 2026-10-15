@@ -31,7 +31,7 @@ LORAS = {  # model -> its LoRAs, name[:strength] as on the command line (.safete
     "2.1": [],
 }
 LIGHTNING = ["4", "8"]  # 2511 only
-TRIGGERS = {  # LoRA (as in LORAS, without the strength) -> the prompt its author asks for; added for that LoRA
+TRIGGERS = {  # LoRA name (no strength, no .safetensors) -> the prompt its author asks for; added for that LoRA
     "qwen-edit-skin-1.1": "Make the subjects skin details more prominent and natural.",
 }
 
@@ -44,9 +44,18 @@ def choices(items: list) -> list[tuple]:
     return [c for k in range(len(items) + 1) for c in itertools.combinations(items, k)]
 
 
+def lora_name(lora: str | tuple[str, float]) -> str:
+    """A LoRA's name as TRIGGERS keys it: "Skin_Fix_rank64:0.8", "Skin_Fix_rank64.safetensors" and
+    ("Skin_Fix_rank64", 0.8) are all "Skin_Fix_rank64"."""
+    spec = lora if isinstance(lora, str) else lora[0]
+    return spec.split(":")[0].removesuffix(".safetensors")
+
+
 def folder(model: str, loras: tuple[str, ...]) -> str:
     """The rope folder of a combination: into_model_loras, e.g. tests/skin_2511_qwen-edit-skin-1.1+Skin_Fix_rank64:0.8;
-    without a LoRA, into_model."""
+    without a LoRA, into_model. BASE's own LoRAs are in every combination, so they are not in the name."""
+    if not BASE.into:
+        raise ValueError("BASE.into is needed: the folders are named from it")
     bits = [BASE.into, model]
     if loras:
         bits.append("+".join(l.replace(".safetensors", "") for l in loras))
@@ -54,17 +63,18 @@ def folder(model: str, loras: tuple[str, ...]) -> str:
 
 
 def prompt(loras: tuple[str, ...]) -> str:
-    """BASE.prompt followed by the triggers of the LoRAs in `loras`."""
-    return " ".join(p for p in [BASE.prompt, *(TRIGGERS.get(l.split(":")[0], "") for l in loras)] if p)
+    """BASE.prompt followed by the triggers of BASE's LoRAs and of `loras`, each trigger once."""
+    triggers = dict.fromkeys(TRIGGERS.get(lora_name(l), "") for l in [*BASE.lora, *loras])
+    return " ".join(p for p in [BASE.prompt, *triggers] if p)
 
 
 def batch():
-    """The requests, one per combination, each BASE with the combination's fields changed."""
+    """The requests, one per combination, each BASE with the combination's fields changed; BASE's LoRAs stay."""
     # 3. The grid.
     for model, loras_of_model in LORAS.items():
         for lightning, loras in itertools.product(LIGHTNING if model == "2511" else [None], choices(loras_of_model)):
-            yield dataclasses.replace(BASE, prompt=prompt(loras), model=model, lightning=lightning, lora=list(loras),
-                                      into=folder(model, loras))
+            yield dataclasses.replace(BASE, prompt=prompt(loras), model=model, lightning=lightning,
+                                      lora=[*BASE.lora, *loras], into=folder(model, loras))
 
 
 def main() -> None:
