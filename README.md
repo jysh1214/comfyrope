@@ -34,6 +34,7 @@ rope/target/release/rope-gui                            # browse the results
 ├── download_models.py   # downloads models from Hugging Face (run with uv, nothing to install first)
 ├── run_comfyui.sh       # starts ComfyUI (written by install_comfyui.py)
 ├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
+├── run.py               # template for a batch of settings to compare, on img2img.py's Python API
 ├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
 │   ├── diffusion_models/
@@ -363,7 +364,7 @@ ComfyUI:
 `img2img.py` is also a module. `import img2img`, build a `Request` per combination to try, and `run()` makes them all in one go: through one ComfyUI (started once if none is running), each input uploaded once, and every result in rope with its recipe, so the combinations can be compared side by side in `rope-gui`. A `Request` has a field per option above, with the same names and defaults, and `dataclasses.replace` makes variants of one:
 
 ```python
-# compare.py: the skin LoRAs at a few strengths, with the 4- and 8-step Lightning LoRA, on one seed
+# the skin LoRAs at a few strengths, with the 4- and 8-step Lightning LoRA, on one seed
 import dataclasses, itertools
 import img2img
 
@@ -378,7 +379,7 @@ for r in img2img.run(requests):
     print(r.short, r.folder, r.request.lightning, r.request.lora, r.request.tags)
 ```
 
-Run it from the repo root with `.venv/bin/python compare.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); from elsewhere, put the repo on `PYTHONPATH`.
+`run.py` is this as a template: a `BASE` request, the settings to vary, and a `batch()` that yields the combinations, each in a rope folder named after it. Copy it, fill in the three numbered parts, and run it from the repo root with `.venv/bin/python run.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); `--list` prints the batch after checking every request, without making anything. From elsewhere, put the repo on `PYTHONPATH`.
 
 | Name | What it is |
 |---|---|
