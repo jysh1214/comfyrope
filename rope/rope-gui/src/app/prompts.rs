@@ -1,17 +1,22 @@
 //! The Prompts page: prompts worth keeping, each with a title and its text. The list is in the middle and the
-//! editor on the right, as images and their details are.
+//! editor on the right, as images and their details are. A prompt exists from the moment it is made: New prompt
+//! adds one titled Draft, with no text yet, to paste into later.
 
 use super::{Action, App, Dialog};
+use crate::model::View;
 use eframe::egui::{self, RichText, Sense};
-use rope_core::prompts::{self, Prompt};
+use rope_core::prompts::{self, Prompt, Prompts};
+use std::collections::HashSet;
 
-/// The prompt being edited: an existing one, or a new one until it is saved.
+/// The prompt open in the editor.
 pub(super) struct PromptEdit {
-    pub id: Option<String>,
+    pub id: String,
     pub title: String,
     pub text: String,
     /// What is saved, to know when the editor is dirty.
     pub saved: (String, String),
+    /// Put the cursor in the text once, for a prompt just made.
+    pub focus_text: bool,
 }
 
 impl PromptEdit {
@@ -20,24 +25,54 @@ impl PromptEdit {
     }
 }
 
+/// Draft, or Draft 2, Draft 3... when those are taken.
+pub(super) fn draft_title(prompts: &Prompts) -> String {
+    let taken: HashSet<&str> = prompts.prompts.iter().map(|p| p.title.as_str()).collect();
+    (1..)
+        .map(|n| if n == 1 { "Draft".to_owned() } else { format!("Draft {n}") })
+        .find(|t| !taken.contains(t.as_str()))
+        .expect("some number is free")
+}
+
 impl App {
-    /// Opens the editor on the prompt `id`, or, without one, on a new prompt with `title` and `text`.
-    pub(super) fn edit_prompt(&mut self, id: Option<String>, title: String, text: String) {
-        let (title, text, saved) = match id.as_deref().and_then(|i| self.model().prompts.get(i)) {
-            Some(p) => (p.title.clone(), p.text.clone(), (p.title.clone(), p.text.clone())),
-            None => (title, text, (String::new(), String::new())),
-        };
-        self.prompt = Some(PromptEdit { id, title, text, saved });
+    /// Opens the editor on the prompt `id`.
+    pub(super) fn edit_prompt(&mut self, id: &str) {
+        let Some(p) = self.model().prompts.get(id) else { return };
+        let saved = (p.title.clone(), p.text.clone());
+        self.prompt = Some(PromptEdit {
+            id: id.to_owned(),
+            title: p.title.clone(),
+            text: p.text.clone(),
+            saved,
+            focus_text: false,
+        });
     }
 
-    /// Writes the editor's prompt: a new one is added, an existing one changed.
+    /// Adds a prompt and opens it in the editor, on the Prompts page. Without a title it is a Draft, with no text
+    /// yet, for pasting into later.
+    pub(super) fn add_prompt(&mut self, title: Option<String>, text: &str) -> anyhow::Result<()> {
+        let title = title.unwrap_or_else(|| draft_title(&self.model().prompts));
+        let p = prompts::add(&self.lib, &title, text)?;
+        self.refresh();
+        if self.view != View::Prompts {
+            self.view = View::Prompts;
+            self.selected.clear();
+            self.anchor = None;
+        }
+        self.edit_prompt(&p.id);
+        if let Some(e) = self.prompt.as_mut() {
+            e.focus_text = text.is_empty();
+        }
+        self.say(format!("added the prompt {:?}", p.title), false);
+        Ok(())
+    }
+
+    /// Writes what the editor holds.
     pub(super) fn save_prompt(&mut self) -> anyhow::Result<()> {
         let Some(e) = self.prompt.as_mut() else { return Ok(()) };
-        let p = match &e.id {
-            Some(id) => prompts::edit(&self.lib, id, Some(&e.title), Some(&e.text))?,
-            None => prompts::add(&self.lib, &e.title, &e.text)?,
-        };
-        *e = PromptEdit { id: Some(p.id), title: p.title.clone(), text: p.text.clone(), saved: (p.title, p.text) };
+        let p = prompts::edit(&self.lib, &e.id, Some(&e.title), Some(&e.text))?;
+        (e.title, e.text) = (p.title.clone(), p.text.clone());
+        e.saved = (p.title, p.text);
         self.refresh();
         self.say("prompt saved", false);
         Ok(())
@@ -45,7 +80,7 @@ impl App {
 
     pub(super) fn delete_prompt(&mut self, id: &str) -> anyhow::Result<()> {
         let p = prompts::remove(&self.lib, id)?;
-        if self.prompt.as_ref().is_some_and(|e| e.id.as_deref() == Some(id)) {
+        if self.prompt.as_ref().is_some_and(|e| e.id == id) {
             self.prompt = None;
         }
         self.refresh();
@@ -57,8 +92,7 @@ impl App {
     /// nothing was typed here yet.
     pub(super) fn follow_prompts(&mut self) {
         let Some(e) = self.prompt.as_mut() else { return };
-        let Some(id) = &e.id else { return };
-        match self.model.as_ref().expect("loaded").prompts.get(id) {
+        match self.model.as_ref().expect("loaded").prompts.get(&e.id) {
             None => self.prompt = None,
             Some(p) if !e.dirty() && (p.title != e.title || p.text != e.text) => {
                 e.title = p.title.clone();
@@ -86,8 +120,8 @@ impl App {
     /// The middle of the window on the Prompts page: the list.
     pub(super) fn prompt_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("New prompt").clicked() {
-                actions.push(Action::EditPrompt(None));
+            if ui.button("New prompt").on_hover_text("adds a Draft with no text yet; paste the text in and save").clicked() {
+                actions.push(Action::AddPrompt { title: None, text: String::new() });
             }
             ui.label(
                 RichText::new("Prompts to use again. Copy one into the next img2img.py command, or in a shell: \"$(rope prompt show TITLE)\"")
@@ -106,7 +140,7 @@ impl App {
             });
             return;
         }
-        let current = self.prompt.as_ref().and_then(|e| e.id.clone());
+        let current = self.prompt.as_ref().map(|e| e.id.clone());
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for p in &shown {
                 let selected = current.as_deref() == Some(p.id.as_str());
@@ -127,11 +161,15 @@ impl App {
                                 }
                             });
                         });
-                        ui.add(egui::Label::new(RichText::new(&p.text).small()).wrap());
+                        if p.text.is_empty() {
+                            ui.label(RichText::new("no text yet").weak().small());
+                        } else {
+                            ui.add(egui::Label::new(RichText::new(&p.text).small()).wrap());
+                        }
                     })
                     .response;
                 if resp.interact(Sense::click()).clicked() {
-                    actions.push(Action::EditPrompt(Some(p.id.clone())));
+                    actions.push(Action::EditPrompt(p.id.clone()));
                 }
                 ui.add_space(4.0);
             }
@@ -145,22 +183,21 @@ impl App {
             return;
         };
         let dirty = e.dirty();
-        ui.heading(if e.id.is_some() { "Prompt" } else { "New prompt" });
+        ui.heading("Prompt");
         ui.add_space(4.0);
         ui.label("Title");
-        let title =
-            ui.add(egui::TextEdit::singleline(&mut e.title).desired_width(f32::INFINITY).hint_text("e.g. 黃昏海邊"));
-        if e.id.is_none() && e.title.is_empty() && e.text.is_empty() {
-            title.request_focus();
-        }
+        ui.add(egui::TextEdit::singleline(&mut e.title).desired_width(f32::INFINITY).hint_text("e.g. 黃昏海邊"));
         ui.add_space(4.0);
         ui.label("Text");
-        ui.add(
+        let text = ui.add(
             egui::TextEdit::multiline(&mut e.text)
                 .desired_rows(10)
                 .desired_width(f32::INFINITY)
                 .hint_text("the prompt"),
         );
+        if std::mem::take(&mut e.focus_text) {
+            text.request_focus();
+        }
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(dirty && !e.title.trim().is_empty(), egui::Button::new("Save")).clicked() {
@@ -172,10 +209,8 @@ impl App {
             if ui.button("Copy").on_hover_text("copy the text").clicked() {
                 actions.push(Action::CopyText(e.text.clone()));
             }
-            if let Some(id) = &e.id
-                && ui.button("Delete…").clicked()
-            {
-                actions.push(Action::Dialog(Dialog::DeletePrompt { id: id.clone() }));
+            if ui.button("Delete…").clicked() {
+                actions.push(Action::Dialog(Dialog::DeletePrompt { id: e.id.clone() }));
             }
             if ui.button("Close").clicked() {
                 actions.push(Action::ClosePrompt);

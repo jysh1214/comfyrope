@@ -95,11 +95,11 @@ enum Action {
     ToggleInfo,
     /// Mark these images as favorites, or, when all of them are already, unmark them.
     ToggleFavorite(Vec<String>),
-    /// Edit the prompt with this id on the Prompts page, or start a new one.
-    EditPrompt(Option<String>),
-    /// Start a new prompt with this title and text, on the Prompts page.
-    DraftPrompt {
-        title: String,
+    /// Edit the prompt with this id on the Prompts page.
+    EditPrompt(String),
+    /// Add a prompt, titled Draft without a title, and open it on the Prompts page.
+    AddPrompt {
+        title: Option<String>,
         text: String,
     },
     SavePrompt,
@@ -319,15 +319,8 @@ impl App {
                     self.anchor = None;
                 }
             }
-            Action::EditPrompt(id) => self.edit_prompt(id, String::new(), String::new()),
-            Action::DraftPrompt { title, text } => {
-                if self.view != View::Prompts {
-                    self.view = View::Prompts;
-                    self.selected.clear();
-                    self.anchor = None;
-                }
-                self.edit_prompt(None, title, text);
-            }
+            Action::EditPrompt(id) => self.edit_prompt(&id),
+            Action::AddPrompt { title, text } => self.add_prompt(title, &text)?,
             Action::SavePrompt => self.save_prompt()?,
             Action::ClosePrompt => self.prompt = None,
             Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
@@ -1138,7 +1131,7 @@ impl App {
                     .small_button("Save prompt")
                     .on_hover_text("keep it on the Prompts page, under this image's name");
                 if save.clicked() {
-                    actions.push(Action::DraftPrompt { title: d.name.clone(), text: p.to_owned() });
+                    actions.push(Action::AddPrompt { title: Some(d.name.clone()), text: p.to_owned() });
                 }
             }
             if let Some(p) = made.get("enhanced_prompt").and_then(|v| v.as_str()).filter(|p| !p.is_empty()) {
@@ -1385,8 +1378,8 @@ impl App {
                 if copy {
                     actions.push(Action::CopyText(e.text.clone()));
                 }
-                if del && let Some(id) = &e.id {
-                    actions.push(Action::Dialog(Dialog::DeletePrompt { id: id.clone() }));
+                if del {
+                    actions.push(Action::Dialog(Dialog::DeletePrompt { id: e.id.clone() }));
                 }
                 if esc {
                     actions.push(Action::ClosePrompt);
@@ -1987,15 +1980,28 @@ mod tests {
         frames_until(&ctx, &mut app, |_| true);
         assert_eq!(app.selected.len(), 5);
 
-        // the Prompts page: a prompt kept from an image's recipe, one added by the CLI, an edit and a delete
-        app.apply(Action::DraftPrompt { title: "result".into(), text: "把背景換成海邊".into() }, Some(&ctx));
+        // the Prompts page: a prompt kept from an image's recipe is saved at once, so is a New prompt (a Draft
+        // with no text), then one added by the CLI, an edit and a delete
+        app.apply(Action::AddPrompt { title: Some("result".into()), text: "把背景換成海邊".into() }, Some(&ctx));
         assert_eq!(app.view, View::Prompts);
         frames_until(&ctx, &mut app, |_| true); // draws the list and the editor
-        app.apply(Action::SavePrompt, Some(&ctx));
         let ps = rope_core::prompts::Prompts::load(&lib).unwrap();
         let saved = ps.prompts[0].clone();
         assert_eq!((ps.prompts.len(), saved.title.as_str(), saved.text.as_str()), (1, "result", "把背景換成海邊"));
-        assert_eq!(app.prompt.as_ref().unwrap().id.as_deref(), Some(saved.id.as_str()));
+        assert_eq!(app.prompt.as_ref().unwrap().id, saved.id);
+        for expected in ["Draft", "Draft 2"] {
+            app.apply(Action::AddPrompt { title: None, text: String::new() }, Some(&ctx));
+            let e = app.prompt.as_ref().unwrap();
+            assert_eq!((e.title.as_str(), e.text.as_str(), e.focus_text), (expected, "", true));
+            frames_until(&ctx, &mut app, |a| !a.prompt.as_ref().unwrap().focus_text);
+        }
+        let drafts: Vec<String> = app.model().prompts.prompts.iter().map(|p| p.title.clone()).collect();
+        assert_eq!(drafts, ["result", "Draft", "Draft 2"]);
+        let ids: Vec<String> = app.model().prompts.prompts[1..].iter().map(|p| p.id.clone()).collect();
+        for id in &ids {
+            app.delete_prompt(id).unwrap();
+        }
+        app.edit_prompt(&saved.id);
         let other = rope_core::prompts::add(&lib, "Night", "星空").unwrap();
         frames_until(&ctx, &mut app, |a| a.model().prompts.prompts.len() == 2);
         app.search = "night".into();
