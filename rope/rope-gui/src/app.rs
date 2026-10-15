@@ -610,7 +610,7 @@ impl App {
         let model = self.model();
         let counts = &model.counts;
         let row = |ui: &mut egui::Ui, view: View, text: String, actions: &mut Vec<Action>| {
-            if ui.selectable_label(self.view == view, text).clicked() {
+            if sidebar_row(ui, self.view == view, text).clicked() {
                 actions.push(Action::View(view));
             }
         };
@@ -636,7 +636,7 @@ impl App {
                 }
             }
             ui.add_space(8.0);
-            let trash = ui.selectable_label(self.view == View::Trash, format!("Trash  ({})", model.trashed));
+            let trash = sidebar_row(ui, self.view == View::Trash, format!("Trash  ({})", model.trashed));
             if trash.clicked() {
                 actions.push(Action::View(View::Trash));
             }
@@ -732,7 +732,7 @@ impl App {
             if model.catalog.children(Some(id)).is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(ui.spacing().indent);
-                    let resp = ui.selectable_label(selected, text);
+                    let resp = sidebar_row(ui, selected, text);
                     if resp.clicked() {
                         actions.push(Action::View(View::Folder(id.to_owned())));
                     }
@@ -746,7 +746,7 @@ impl App {
                 );
                 state
                     .show_header(ui, |ui| {
-                        let resp = ui.selectable_label(selected, text);
+                        let resp = sidebar_row(ui, selected, text);
                         if resp.clicked() {
                             actions.push(Action::View(View::Folder(id.to_owned())));
                         }
@@ -1587,6 +1587,22 @@ impl App {
     }
 }
 
+/// A row of the sidebar: `text` on a selectable button that is cut with … where the panel is too narrow for it,
+/// so a long folder name never widens the panel (egui widens a panel to what is drawn in it). A cut row shows
+/// its whole text on hover.
+fn sidebar_row(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
+    let galley = egui::WidgetText::from(text.as_str()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let wanted = galley.size().x + 2.0 * ui.spacing().button_padding.x;
+    let cut = wanted > ui.available_width();
+    let resp = ui.add(egui::Button::selectable(selected, text.as_str()).truncate());
+    if cut { resp.on_hover_text(text) } else { resp }
+}
+
 /// A five-pointed star filling `rect`: filled gold for a favorite, else an outline, brighter when `hot`. Drawn
 /// with lines rather than taken from a font, so it is crisp at this size on every machine.
 pub(crate) fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, hot: bool) {
@@ -1758,6 +1774,32 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| app.frame(ctx));
+    }
+
+    #[test]
+    fn a_long_folder_name_is_cut_rather_than_widening_the_sidebar() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let long = "tests/skin_2511_qwen-edit-skin-1.1+Skin_Fix_rank64:0.8+and-a-third-one-for-good-measure";
+        store::edit_catalog(&lib, "mkdir", &[], |c| c.mkdir(long, true).map(drop)).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib, None);
+        frames_until(&ctx, &mut app, |a| a.model.as_ref().is_some_and(|m| m.catalog.folders.len() == 2));
+        let width = |ctx: &egui::Context| {
+            egui::containers::panel::PanelState::load(ctx, egui::Id::new("folders")).unwrap().rect.width()
+        };
+        for _ in 0..3 {
+            frames_until(&ctx, &mut app, |_| true);
+        }
+        assert!((width(&ctx) - 220.0).abs() < 1.0, "the sidebar is {} wide", width(&ctx));
+
+        // its edge dragged in narrows it, and it stays narrow
+        let edge = egui::pos2(width(&ctx), 450.0);
+        drag(&ctx, &mut app, edge, egui::pos2(150.0, 450.0));
+        for _ in 0..3 {
+            frames_until(&ctx, &mut app, |_| true);
+        }
+        assert!((width(&ctx) - 150.0).abs() < 2.0, "the sidebar is {} wide", width(&ctx));
     }
 
     #[test]
