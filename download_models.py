@@ -3,8 +3,8 @@
 # requires-python = ">=3.11"
 # dependencies = ["huggingface_hub>=1.0,<3"]
 # ///
-"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 model files (ComfyUI repacks) from Hugging Face, and
-optional skin LoRAs for 2511 (one of them from Civitai, which needs an API key).
+"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 / Wan 2.2 model files (ComfyUI repacks) from Hugging Face,
+and optional skin LoRAs for 2511 (one of them from Civitai, which needs an API key).
 
 Files land in a ComfyUI-style layout under --dest:
     <dest>/diffusion_models/   <dest>/text_encoders/   <dest>/vae/   <dest>/loras/
@@ -18,6 +18,8 @@ Examples:
     ./download_models.py all --limit-rate 5M            # cap at 5 MiB/s (k/M/G suffix, 1024-based)
     ./download_models.py 2.1 --q21-precision bf16 --only diffusion
     ./download_models.py 2511 --skin-loras edit-skin skin-fix --only lora   # skin LoRAs; skin-fix needs $CIVITAI_TOKEN
+    ./download_models.py wan                            # Wan 2.2 image-to-video, 14B fp8 + the 4-step LoRAs
+    ./download_models.py wan --wan-task ti2v            # the 5B hybrid model instead (one file, 10 GB)
 
 Downloads resume on re-run; a file already present with the right size is skipped.
 Without --limit-rate the hf_xet fast path is used; with it, a plain HTTP stream with
@@ -65,6 +67,7 @@ EDIT = "Comfy-Org/Qwen-Image-Edit_ComfyUI"
 QI = "Comfy-Org/Qwen-Image_ComfyUI"
 L2511 = "lightx2v/Qwen-Image-Edit-2511-Lightning"
 SKIN = "tlennon-ie/qwen-edit-skin"
+WAN22 = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
 
 KIND_DIR = {
     "diffusion": "diffusion_models",
@@ -79,8 +82,12 @@ MODEL_ALIASES = {
     "2511": "qwen-image-edit-2511",
     "edit": "qwen-image-edit-2511",
     "qwen-image-edit-2511": "qwen-image-edit-2511",
+    "wan": "wan-2.2",
+    "wan2.2": "wan-2.2",
+    "wan-2.2": "wan-2.2",
     "all": "all",
 }
+IMAGE_MODELS = {"qwen-image-2.1", "qwen-image-edit-2511"}  # what "all" means: the models img2img.py runs
 
 CHUNK = 256 * 1024  # bytes per read in the throttled path
 RETRIES = 8  # network retries per file in the plain-HTTP path (each resumes from the .part size)
@@ -163,6 +170,29 @@ def plan_edit_2511(a: argparse.Namespace) -> list[F]:
     return files
 
 
+def plan_wan_22(a: argparse.Namespace) -> list[F]:
+    """Wan 2.2 video models, the files ComfyUI's Wan 2.2 templates reference. i2v and t2v are the A14B pair (a
+    high-noise and a low-noise model, each 14B) with the Wan 2.1 VAE; ti2v is the 5B hybrid with its own VAE.
+    The 4-step lightx2v LoRAs exist for the 14B pair only."""
+    files: list[F] = [F(WAN22, "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "text_encoder", 6.74)]
+    suffix, size = ("fp8_scaled", 14.29) if a.wan_precision == "fp8" else ("fp16", 28.58)
+    for task in a.wan_task:
+        if task == "ti2v":
+            files += [F(WAN22, "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "diffusion", 10.00),
+                      F(WAN22, "split_files/vae/wan2.2_vae.safetensors", "vae", 1.41)]
+            continue
+        for noise in ("high", "low"):
+            files.append(F(WAN22, f"split_files/diffusion_models/wan2.2_{task}_{noise}_noise_14B_{suffix}.safetensors",
+                           "diffusion", size))
+        files.append(F(WAN22, "split_files/vae/wan_2.1_vae.safetensors", "vae", 0.25))
+        if a.wan_lightning == "4":
+            version = "v1" if task == "i2v" else "v1.1"
+            for noise in ("high", "low"):
+                files.append(F(WAN22, f"split_files/loras/wan2.2_{task}_lightx2v_4steps_lora_{version}_{noise}_noise.safetensors",
+                               "lora", 1.23))
+    return files
+
+
 def full_catalog() -> list[F]:
     """Everything this script knows how to fetch (for --list)."""
     out: list[F] = []
@@ -173,6 +203,8 @@ def full_catalog() -> list[F]:
             out += plan_qwen_image_21(ns)
     for prec in ("fp8", "int8", "bf16"):
         out += plan_edit_2511(argparse.Namespace(edit_precision=prec, lightning="both", skin_loras=list(SKIN_LORAS)))
+    for prec in ("fp8", "fp16"):
+        out += plan_wan_22(argparse.Namespace(wan_task=["i2v", "t2v", "ti2v"], wan_precision=prec, wan_lightning="4"))
     return dedupe(out)
 
 
@@ -368,7 +400,8 @@ def fetch_throttled(f: F, dest: Path, rate: int | None, token: str | None, expec
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("models", nargs="*", metavar="MODEL",
-                   help="2.1 | 2511 | all  (also: qwen-image-2.1, qwen-image-edit-2511, edit)")
+                   help="2.1 | 2511 | wan | all  (also: qwen-image-2.1, qwen-image-edit-2511, edit, wan2.2); "
+                        "all is the image models, 2.1 and 2511; wan is asked for by name")
     p.add_argument("--dest", type=Path, default=Path(__file__).resolve().parent / "models",
                    help="ComfyUI-style models root (default: ./models next to this script)")
     p.add_argument("--only", nargs="+", choices=list(KIND_DIR), metavar="KIND",
@@ -403,6 +436,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     g.add_argument("--skin-loras", nargs="*", choices=list(SKIN_LORAS), default=[], metavar="NAME",
                    help="skin LoRAs for 2511: edit-skin (qwen-edit-skin 1.1, 0.3 GB, Hugging Face), skin-fix "
                         "(Skin Fix Qwen 2.0, 0.6 GB, Civitai: needs --civitai-token); see README.md, Skin LoRAs")
+
+    g = p.add_argument_group("Wan 2.2")
+    g.add_argument("--wan-task", nargs="+", choices=["i2v", "t2v", "ti2v"], default=["i2v"], metavar="TASK",
+                   help="which models: i2v (image-to-video, 14B pair; default), t2v (text-to-video, 14B pair), "
+                        "ti2v (the 5B hybrid, 10 GB, fp16 only); several at once is fine")
+    g.add_argument("--wan-precision", choices=["fp8", "fp16"], default="fp8",
+                   help="the 14B pair's precision: fp8_scaled (default, 14.3 GB each) | fp16 (28.6 GB each)")
+    g.add_argument("--wan-lightning", choices=["none", "4"], default="4",
+                   help="the lightx2v 4-step LoRAs for the 14B pair (1.2 GB each, two per task; default 4)")
     return p.parse_args(argv)
 
 
@@ -420,7 +462,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if not a.models:
-        sys.exit("error: name at least one model (2.1, 2511, all) or use --list / --help")
+        sys.exit("error: name at least one model (2.1, 2511, wan, all) or use --list / --help")
     import importlib.util
     missing = [pkg for pkg in ("huggingface_hub", "tqdm") if importlib.util.find_spec(pkg) is None]
     if missing:
@@ -432,14 +474,16 @@ def main(argv: list[str]) -> int:
     for m in a.models:
         key = MODEL_ALIASES.get(m.lower())
         if key is None:
-            sys.exit(f"error: unknown model {m!r}; choose from 2.1, 2511, all")
-        chosen.update({"qwen-image-2.1", "qwen-image-edit-2511"} if key == "all" else {key})
+            sys.exit(f"error: unknown model {m!r}; choose from 2.1, 2511, wan, all")
+        chosen.update(IMAGE_MODELS if key == "all" else {key})
 
     files: list[F] = []
     if "qwen-image-2.1" in chosen:
         files += plan_qwen_image_21(a)
     if "qwen-image-edit-2511" in chosen:
         files += plan_edit_2511(a)
+    if "wan-2.2" in chosen:
+        files += plan_wan_22(a)
     files = dedupe(files)
     if a.only:
         files = [f for f in files if f.kind in a.only]

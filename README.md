@@ -6,7 +6,7 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 through ComfyUI on this machine (RT
 |---|---|
 | `setup_venv.sh` | Builds `.venv`, the Python environment for the scripts below |
 | `install_comfyui.py` | Installs or updates ComfyUI with its own venv |
-| `download_models.py` | Downloads the model files from Hugging Face, and optional skin LoRAs |
+| `download_models.py` | Downloads the model files from Hugging Face: the image models, optional skin LoRAs, and Wan 2.2 for video |
 | `run_comfyui.sh` | Starts ComfyUI |
 | `img2img.py` | Makes a new image from input images and a prompt, through ComfyUI's API. Also a Python module, for running many combinations in one go |
 | `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
@@ -131,9 +131,10 @@ uv run download_models.py 2511                      # only Edit-2511
 uv run download_models.py 2.1 --prompt-enhancer i2i # 2.1 plus the i2i prompt enhancer
 uv run download_models.py all --limit-rate 5M       # limit the speed to 5 MiB/s
 uv run download_models.py 2511 --skin-loras edit-skin skin-fix   # the skin LoRAs; skin-fix needs $CIVITAI_TOKEN
+uv run download_models.py wan                       # Wan 2.2 image-to-video: the 14B pair in fp8, with the 4-step LoRAs
 ```
 
-MODEL is `2.1`, `2511` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`).
+MODEL is `2.1`, `2511`, `wan` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`, `wan2.2`). `all` is the two image models, the ones `img2img.py` runs; `wan` is asked for by name.
 
 ### The default set
 
@@ -156,6 +157,19 @@ Not in the default set; `--skin-loras NAME…` adds them for 2511. How to use th
 | `edit-skin` | `loras/qwen-edit-skin-1.1.safetensors` | 0.3 GB | Hugging Face, [tlennon-ie/qwen-edit-skin](https://huggingface.co/tlennon-ie/qwen-edit-skin): the 2750-step file of version 1.1, the one Civitai serves as v1.1, saved under a shorter name |
 | `skin-fix` | `loras/Skin_Fix_rank64.safetensors` | 0.6 GB | Civitai, [Skin Fix Qwen v2.0](https://civitai.com/models/2031296/skin-fix-qwen). Civitai refuses downloads without an API key: make one at https://civitai.com/user/account (API Keys, at the bottom) and pass `--civitai-token` or set `$CIVITAI_TOKEN`. The file is checked against its SHA-256 |
 
+### Wan 2.2
+
+Alibaba's open video models (Apache 2.0), as repacked by Comfy-Org for ComfyUI's own Wan 2.2 templates ([ComfyUI's Wan 2.2 guide](https://docs.comfy.org/tutorials/video/wan/wan2_2)). `img2img.py` does not run them yet; the files land in the same `models/` layout, so ComfyUI finds them. `--wan-task` picks the models, several at once if wanted:
+
+| TASK | Files | Size |
+|---|---|---|
+| `i2v` (default) | `diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled` + `..._low_noise_...`, `vae/wan_2.1_vae`, `loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise` + `..._low_noise` | 14.3 + 14.3 + 0.25 + 1.2 + 1.2 GB |
+| `t2v` | the same for `t2v` (LoRAs `v1.1`) | 31.3 GB |
+| `ti2v` | `diffusion_models/wan2.2_ti2v_5B_fp16`, `vae/wan2.2_vae` | 10 + 1.4 GB |
+| all | `text_encoders/umt5_xxl_fp8_e4m3fn_scaled` | 6.7 GB |
+
+The 14B pair is a high-noise and a low-noise model that the workflow runs one after the other; `--wan-precision fp16` doubles them to 28.6 GB each. The 4-step LoRAs are what the Lightning LoRAs are for 2511; `--wan-lightning none` leaves them out. The 5B model is one file and runs within 8 GB of VRAM; it has no 4-step LoRA in the repack.
+
 ### Options
 
 | Option | Description |
@@ -176,6 +190,9 @@ Not in the default set; `--skin-loras NAME…` adds them for 2511. How to use th
 | `--edit-precision fp8\|int8\|bf16` | The 2511 model: fp8mixed (default) / int8_convrot / bf16 (40.9 GB, needs offloading) |
 | `--skin-loras NAME…` | Skin LoRAs for 2511: `edit-skin`, `skin-fix` (see above) |
 | `--lightning none\|4\|8\|both` | 2511's Lightning LoRAs; by default only the 4-step one |
+| `--wan-task TASK…` | Wan 2.2 models: `i2v` (default), `t2v`, `ti2v` (see above) |
+| `--wan-precision fp8\|fp16` | The Wan 14B pair: fp8_scaled (default, 14.3 GB each) or fp16 (28.6 GB each) |
+| `--wan-lightning none\|4` | The lightx2v 4-step LoRAs for the Wan 14B pair; fetched by default |
 
 ### Behavior
 
@@ -187,7 +204,7 @@ Not in the default set; `--skin-loras NAME…` adds them for 2511. How to use th
 
 ### Adding files
 
-The file lists are `plan_qwen_image_21()` and `plan_edit_2511()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on); `name=` saves the file under another name. A file that is not on Hugging Face takes `url=`, `size=` and `sha256=` instead, as the Civitai entry in `SKIN_LORAS` does; it is fetched over plain HTTP and checked against the hash. Check with `--list` afterwards.
+The file lists are `plan_qwen_image_21()`, `plan_edit_2511()` and `plan_wan_22()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on); `name=` saves the file under another name. A file that is not on Hugging Face takes `url=`, `size=` and `sha256=` instead, as the Civitai entry in `SKIN_LORAS` does; it is fetched over plain HTTP and checked against the hash. Check with `--list` afterwards.
 
 ## Starting ComfyUI: run_comfyui.sh
 
