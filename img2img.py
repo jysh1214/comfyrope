@@ -1145,10 +1145,10 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
     import websocket
 
     comfy, status, timeout = run.comfy, run.status, run.options.timeout
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout  # moved on by every word about one of the jobs: a batch has no total limit
     while pending:
         if time.monotonic() > deadline:
-            die(f"gave up after {timeout}s; the job may still be running in ComfyUI")
+            die(f"no word from ComfyUI about the job for {timeout}s; it may still be running there")
         try:
             raw = ws.recv()
         except websocket.WebSocketTimeoutException:
@@ -1156,6 +1156,7 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
                 entry = comfy.history(pid)
                 if entry is not None:
                     collect(run, pid, pending.pop(pid), entry)
+                    deadline = time.monotonic() + timeout
             continue
         except websocket.WebSocketConnectionClosedException:
             die("lost the connection to ComfyUI" + (f":\n{comfy.log_tail()}" if comfy.proc else ""))
@@ -1167,6 +1168,7 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
         job = pending.get(pid)
         if job is None:
             continue
+        deadline = time.monotonic() + timeout
         node = data.get("node")
         if kind == "execution_start":
             job.started = time.monotonic()
@@ -1288,7 +1290,7 @@ def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_ser
       keep_server  leave a ComfyUI this run started running, so that the next run skips the model load
       no_start     raise instead of starting a ComfyUI
       comfy_args   extra flags for a ComfyUI this run starts, e.g. "--reserve-vram 2"
-      timeout      give up after this many seconds
+      timeout      give up when ComfyUI has said nothing about the jobs for this many seconds
       fresh        compute again even when ComfyUI has cached the result of an identical workflow
       library      the rope library; default $ROPE_LIBRARY, else ~/.local/share/rope
     """
@@ -1371,7 +1373,8 @@ def add_comfy_args(g) -> None:
     g.add_argument("--no-start", action="store_true", help="fail instead of starting ComfyUI when none is running")
     g.add_argument("--comfy-args", default="", metavar="ARGS",
                    help='extra flags for a ComfyUI this command starts, e.g. "--reserve-vram 2"')
-    g.add_argument("--timeout", type=int, default=TIMEOUT, help=f"give up after this many seconds (default {TIMEOUT})")
+    g.add_argument("--timeout", type=int, default=TIMEOUT,
+                   help=f"give up when ComfyUI has said nothing about the jobs for this many seconds (default {TIMEOUT})")
     g.add_argument("--fresh", action="store_true",
                    help="compute the image again even when ComfyUI has the result of an identical workflow cached "
                         "(the GPU's results differ slightly from run to run); the loaded models are kept. A replay "

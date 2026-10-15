@@ -373,7 +373,7 @@ ComfyUI:
 | `--keep-server` | Leave a ComfyUI this command started running, so the next command skips the model load |
 | `--no-start` | Fail when no ComfyUI is running instead of starting one |
 | `--comfy-args "..."` | Extra flags for a ComfyUI this command starts, e.g. `"--reserve-vram 2"` |
-| `--timeout N` | Give up after N seconds; default 1800 |
+| `--timeout N` | Give up when ComfyUI has said nothing about the jobs for N seconds; default 1800. A batch has no total limit: every progress message starts the count again |
 | `--fresh` | Compute the image again even when ComfyUI has cached the result of an identical workflow (same inputs, settings and seed); the loaded models are kept. GPU results differ slightly from run to run, so a fresh run is a new image |
 
 ### From Python
