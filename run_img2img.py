@@ -20,8 +20,9 @@ BASE = img2img.Request(
     count=1,  # images per combination, one seed each from `seed`
     seed=42,
     into="tests/skin",  # the prefix of the rope folders: into_model_loras, see folder()
-    # the rest, with their defaults: negative="", steps=None, cfg=None, resolution=None, enhance=False, tags=[],
-    # note=None
+    resolution=1024,  # 2.1 scales the reference images to about this many pixels a side; 0 keeps their size.
+    #                   2511 has no such setting, so batch() leaves it out of 2511's requests
+    # the rest, with their defaults: negative="", steps=None, cfg=None, enhance=False, tags=[], note=None
 )
 
 # 2. The settings to vary: every model in LORAS, with every choice of its LoRAs, each one in or out, the empty
@@ -72,9 +73,10 @@ def batch():
     """The requests, one per combination, each BASE with the combination's fields changed; BASE's LoRAs stay."""
     # 3. The grid.
     for model, loras_of_model in LORAS.items():
+        resolution = BASE.resolution if model == "2.1" else None  # 2511 rejects a resolution
         for lightning, loras in itertools.product(LIGHTNING if model == "2511" else [None], choices(loras_of_model)):
             yield dataclasses.replace(BASE, prompt=prompt(loras), model=model, lightning=lightning,
-                                      lora=[*BASE.lora, *loras], into=folder(model, loras))
+                                      resolution=resolution, lora=[*BASE.lora, *loras], into=folder(model, loras))
 
 
 def main() -> None:
