@@ -1,4 +1,4 @@
-# img2img: local image editing and image-to-video with ComfyUI
+# comfyrope: local image editing and image-to-video with ComfyUI
 
 Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 for images and Wan 2.2 for short clips, through ComfyUI on this machine (RTX 4090, 24 GB), from the command line or from Python. Every image goes into rope, its own library, with the recipe that made it.
 

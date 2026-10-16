@@ -154,7 +154,7 @@ impl Library {
             .with_context(|| format!("cannot open {}", path.display()))
     }
 
-    /// Where the img2img repo was last seen, as recorded by img2img.py through `set_repo`.
+    /// Where the comfyrope repo was last seen, as recorded by img2img.py through `set_repo`.
     pub fn repo(&self) -> Option<PathBuf> {
         let text = fs::read_to_string(self.root.join("REPO")).ok()?;
         let line = text.trim();

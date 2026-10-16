@@ -66,7 +66,7 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 ├── catalog.json         # the folder tree, each image's folder, tags, the trash
 ├── prompts.json         # prompts kept to use again, each with a title
 ├── journal.jsonl        # one line per change, only ever appended; the GUI follows it
-├── REPO                 # where the img2img repo was last seen, for repro.sh
+├── REPO                 # where the comfyrope repo was last seen, for repro.sh
 ├── envs/<id>.json       # environment snapshots, shared by every image made in the same environment
 ├── items/3f/<sha256>/   # one folder per image, named after the SHA-256 of its file
 │   ├── 3fa9c1e27b0d.png # the image: 12 hex digits of the hash plus its suffix; read-only, never rewritten

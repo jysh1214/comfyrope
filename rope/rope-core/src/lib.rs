@@ -8,7 +8,7 @@
 //! catalog.json         folders, the folder of each image, tags, the trash
 //! prompts.json         prompts kept to use again, each with a title
 //! journal.jsonl        one line per change, only ever appended; the GUI follows it
-//! REPO                 where the img2img repo was last seen, for repro.sh
+//! REPO                 where the comfyrope repo was last seen, for repro.sh
 //! .lock                flock held around every metadata change
 //! run.lock             img2img.py holds it shared while it brings its inputs in; purge takes it exclusive
 //! runs/<pid>.json      the images each img2img.py run in progress uses, locked by it while it lasts

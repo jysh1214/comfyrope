@@ -73,7 +73,7 @@ enum Cmd {
         tree: bool,
         #[arg(long, default_value = "import", hide = true)]
         via: String,
-        /// Record where the img2img repo is (img2img.py passes this)
+        /// Record where the comfyrope repo is (img2img.py passes this)
         #[arg(long, hide = true)]
         repo: Option<PathBuf>,
     },

@@ -1,7 +1,7 @@
 //! Making an image again: each item's repro.sh, and the commands the CLI and the GUI copy.
 //!
 //! Nothing here stores an absolute path that can go stale. repro.sh finds the library from its own location and
-//! the img2img repo from the library's REPO file; the copied commands are built when asked for.
+//! the comfyrope repo from the library's REPO file; the copied commands are built when asked for.
 
 use crate::catalog::shell_word;
 use crate::{Library, Meta};
@@ -65,7 +65,7 @@ for repo in "${IMG2IMG_REPO:-}" "$(cat "$lib/REPO" 2>/dev/null)"; do
     repo=
 done
 if [ -z "$repo" ]; then
-    echo "repro.sh: cannot find img2img.py; set IMG2IMG_REPO to the img2img repo" >&2
+    echo "repro.sh: cannot find img2img.py; set IMG2IMG_REPO to the comfyrope repo" >&2
     exit 1
 fi
 py="$repo/.venv/bin/python3"
