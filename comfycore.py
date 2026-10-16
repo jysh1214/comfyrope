@@ -4,9 +4,9 @@ into the rope library and converts those ComfyUI cannot read; follows the queued
 result to rope with its recipe: the flags, the inputs, the model files' hashes, and the ComfyUI it ran on.
 
 Not a script, so it has no package header: the script that imports it lists the packages (websocket-client and
-the image decoders) in its own header, and setup_venv.sh installs them from there. A tool on top of it defines
-its Request (Settled says what the core needs of it), builds its workflows as a Graph, and keeps each result
-through Run.keep; img2img.py shows all of it."""
+the image decoders) in its own header, and setup_venv.sh installs them from there. A tool on top of it is a Tool:
+its Request (Settled says what the core needs of one), a build() that makes the Graph of a request, and the
+flags its recipe records; run_requests() does the rest. img2img.py shows all of it."""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +14,7 @@ import io
 import json
 import mimetypes
 import os
+import random
 import re
 import shlex
 import shutil
@@ -26,10 +27,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Any, NoReturn, Protocol
 
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE / "run_comfyui.sh"
@@ -116,6 +117,25 @@ class Settled(Protocol):
     def settled(self) -> Settled: ...
 
 
+@dataclass(frozen=True)
+class Tool:
+    """A tool built on this module, as the module needs to know it: what it is called, and how its requests become
+    workflows, recipes and status lines. img2img.py's TOOL is the example."""
+
+    file: Path  # the script, e.g. img2img.py: the recipe's "by" is its name, its code identity its content
+    packages: dict[str, str]  # module -> package, as the script's header lists them, for check_packages()
+    build: Callable[[Settled, list[str], int, Any], Graph]  # (request, upload names, seed, context) -> its workflow
+    flags: Callable[[Settled, int], list[str]]  # (request, seed) -> the recipe's flags: the settings behind the result
+    describe: Callable[[Settled, int], str]  # (request, first seed) -> its settings in a line, for the "queued" message
+    # fetched once per run, before building, and given to every build(): img2img.py's enhancer system prompt
+    context: Callable[[Comfy, list[Settled]], Any] = lambda comfy, requests: None
+    unit: str = "image"  # what one result is called in messages
+
+    @property
+    def name(self) -> str:
+        return self.file.name
+
+
 @dataclass
 class Options:
     """How to reach ComfyUI and rope: run()'s keyword arguments, the command line's ComfyUI and --library options."""
@@ -131,7 +151,7 @@ class Options:
 
 @dataclass
 class Result:
-    """One image run() made, and where it went."""
+    """One result a run made (an image, for img2img.py), and where it went."""
 
     request: Settled  # settled: the settings as run, every default filled in
     index: int  # which of the request's `count` images, from 1
@@ -716,14 +736,15 @@ def decoder_versions() -> dict:
     return out
 
 
-def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args) -> tuple[dict | None, Path | None]:
-    """Hands a result to rope: the PNG, its recipe and its workflow, as files for `rope ARGS`. Returns rope's
-    answer; or, when rope failed, None and the PNG where it went instead: the GPU work is done then, so the files
+def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args,
+                suffix: str = ".png") -> tuple[dict | None, Path | None]:
+    """Hands a result to rope: its file (`suffix` says the kind), its recipe and its workflow, as files for `rope ARGS`.
+    Returns rope's answer; or, when rope failed, None and the file where it went instead: the GPU work is done then, so the files
     go to rescue/ in the library (or the system's temp folder) with the command that brings them in later."""
     lib = run.lib
     graph = json.dumps(job.graph.nodes, ensure_ascii=False)
     with tempfile.TemporaryDirectory(prefix="img2img-result-") as tmp:
-        files = Path(tmp) / f"{name}.png", Path(tmp) / "made.json", Path(tmp) / "graph.json"
+        files = Path(tmp) / f"{name}{suffix}", Path(tmp) / "made.json", Path(tmp) / "graph.json"
         files[0].write_bytes(data)
         files[1].write_text(made, "utf-8")
         files[2].write_text(graph, "utf-8")
@@ -735,7 +756,7 @@ def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args) -> 
         try:
             base.mkdir(parents=True, exist_ok=True)
             folder = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=base))
-            files = folder / f"{name}.png", folder / "made.json", folder / "graph.json"
+            files = folder / f"{name}{suffix}", folder / "made.json", folder / "graph.json"
             files[0].write_bytes(data)
             files[1].write_text(made, "utf-8")
             files[2].write_text(graph, "utf-8")
@@ -778,11 +799,13 @@ def resolve_input(lib: Library | None, img: Path) -> tuple[Path, str]:
     return img, img.stem
 
 
-def prepare(requests: list[Settled], workdir: Path, lib: Library | None, keep: bool = True) -> list[Inputs]:
+def prepare(requests: list[Settled], workdir: Path, lib: Library | None, keep: bool = True,
+            via: str = "comfycore.py") -> list[Inputs]:
     """The inputs of every request, ready for upload; a file several requests share is handled once. With `keep`,
     each input goes into the library first, read once, and from then on the library's copy is used: the library
     holds exactly the bytes ComfyUI reads, even if the original is moved or rewritten while the job runs. A
-    converted input's PNG is kept with it too. Without `keep` (a dry run), rope only says where @ID inputs are."""
+    converted input's PNG is kept with it too; rope records `via`, the tool's name, as how they came in. Without
+    `keep` (a dry run), rope only says where @ID inputs are."""
     wanted = [[resolve_input(lib, img) for img in r.images] for r in requests]
     files: dict[Path, str] = {}  # each distinct file, with its name
     for pairs in wanted:
@@ -792,7 +815,7 @@ def prepare(requests: list[Settled], workdir: Path, lib: Library | None, keep: b
     keep = keep and lib is not None
     if keep:
         lib.hold()
-        kept = lib.call("import", "--via=img2img.py", f"--repo={HERE}", "--", *map(str, files))
+        kept = lib.call("import", f"--via={via}", f"--repo={HERE}", "--", *map(str, files))
         records = {path: {"id": k["id"], "path": Path(k["path"])} for path, k in zip(files, kept)}
         lib.using([k["id"] for k in kept])
     prepared = dict(zip(files, prepare_inputs([records[p]["path"] for p in files], workdir, list(files.values()))))
@@ -825,13 +848,15 @@ class Job:
 
 @dataclass
 class Run:
-    """What the jobs of one run share: the ComfyUI, the library, and what every recipe records."""
+    """What the jobs of one run share: the tool, the ComfyUI, the library, and what every recipe records."""
 
+    tool: Tool
     comfy: Comfy
     lib: Library
     options: Options
     status: Status
-    keep: Callable[[Run, Job, bytes, str], str]  # keeps a result and says where it went: img2img.py's keep_result, or its keep_replay
+    # (run, job, data, text, suffix): keeps a result and says where it went; keep_result, or img2img.py's keep_replay
+    keep: Callable[[Run, Job, bytes, str, str], str]
     hashes: ModelHashes
     when: time.struct_time = field(default_factory=time.localtime)
     server_info: str = ""
@@ -865,6 +890,44 @@ def exact(x: float) -> str:
     return str(int(x)) if x.is_integer() else repr(x)
 
 
+def recipe(run: Run, job: Job, flags: list[str], enhanced: str) -> dict:
+    """The made field of a result's meta.json in rope; `enhanced` is what the workflow's text_out node showed."""
+    inputs = [{k: v for k, v in (("id", i.get("id")), ("uploaded", i.get("uploaded")), ("upload", name)) if v}
+              for i, name in zip(job.inputs.records, job.inputs.uploaded)]
+    made = {"by": run.tool.name, "at": iso(run.when), "flags": flags, "prompt": job.request.prompt, "inputs": inputs,
+            "enhanced_prompt": enhanced or None,
+            "batch": {"index": job.index, "count": job.request.count, "first_seed": job.seed - job.index + 1},
+            "server": run.server_info or None, "env": run.env, "models": run.models(job.graph.nodes), "code": run.code}
+    return {k: v for k, v in made.items() if v is not None}
+
+
+def keep_result(run: Run, job: Job, data: bytes, text: str, suffix: str) -> str:
+    """Keeps one result in the library, as a Result on its job, and returns what to show for it on the status line:
+    the Run.keep of a tool's run. `text` is what the workflow's text_out node showed, `suffix` the result file's."""
+    r = job.request
+
+    def args(file: Path, made: Path, graph: Path) -> list[str]:
+        out = ["add", str(file), f"--made={made}", f"--graph={graph}", f"--name={name}", f"--repo={HERE}"]
+        if r.into:
+            out += [f"--into={r.into}", "--file-inputs"]
+        out += [f"--tag={t}" for t in r.tags]
+        return out + ([f"--note={r.note}"] if r.note else [])
+
+    name = run_name(run.when, job.inputs.names[0], r.model, job.seed)
+    made = json.dumps(recipe(run, job, run.tool.flags(r, job.seed), text), ensure_ascii=False)
+    result = Result(r, job.index, job.seed, seconds=job.took, enhanced_prompt=text)
+    result.width, result.height = png_size(data) or (0, 0)
+    answer, rescued = send_result(run, name, data, made, job, args, suffix)
+    job.results.append(result)
+    if answer is None:
+        result.path = rescued
+        return "not in rope; see above"
+    result.id, result.short, result.path = answer["id"], answer["short"], Path(answer["path"])
+    result.folder, result.created = answer["folder"], answer["created"]
+    where = f"{result.short}  {result.folder or '/'}"
+    return where if result.created else f"{where}  (rope had these bytes already)"
+
+
 def collect(run: Run, pid: str, job: Job, entry: dict | None) -> None:
     comfy, status = run.comfy, run.status
     for _ in range(50):  # execution_success can arrive a moment before the history entry is written
@@ -888,12 +951,12 @@ def collect(run: Run, pid: str, job: Job, entry: dict | None) -> None:
             status.line(f"  enhanced prompt: {enhanced}")
     refs = (outputs.get(job.graph.image_out) or {}).get("images") or []
     if not refs:
-        die("ComfyUI finished without returning an image")
+        die("ComfyUI finished without returning a result")
     job.took = time.monotonic() - job.started if job.started else 0.0
     took = f", {job.took:.1f}s" if job.started else ""
     for ref in refs:
         data = comfy.fetch(ref)
-        where = run.keep(run, job, data, enhanced)
+        where = run.keep(run, job, data, enhanced, Path(ref["filename"]).suffix or ".png")
         size = png_size(data)
         status.line(f"  -> {where}" + (f"  {size[0]}x{size[1]}" if size else "") + took)
         job.saved.append(where)
@@ -945,9 +1008,61 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
             collect(run, pid, pending.pop(pid), None)
 
 
-def with_comfy(opts: Options, work: Callable[[Comfy], list]) -> list:
+def run_jobs(run: Run, requests: list[Settled], all_inputs: list[Inputs]) -> list[Result]:
+    """Uploads the inputs, queues every job of every request (`count` of them, one seed each), follows them, and
+    keeps each result as it comes. Ctrl-C, or a failure in one job, drops what is still queued and interrupts the
+    running job."""
+    import websocket
+
+    comfy, status = run.comfy, run.status
+    tag = fresh_tag("f") if run.options.fresh else ""
+    uploaded: dict[Path, str] = {}  # a file several requests share goes up once
+    for inputs in all_inputs:
+        for path, stem in zip(inputs.uploads, inputs.stems):
+            if path not in uploaded:
+                uploaded[path] = comfy.upload(path, upload_name(path, stem, tag))
+        inputs.uploaded = [uploaded[path] for path in inputs.uploads]
+    context = run.tool.context(comfy, requests)  # e.g. img2img.py's enhancer system prompt, fetched once for all
+    run.when, run.server_info = time.localtime(), comfy.system_info()  # one time for all the results of this run
+    run.env, run.code = comfy_env(comfy), code_identity(run.tool.file)
+    total = sum(r.count for r in requests)
+    jobs: list[Job] = []
+    bases: list[int] = []
+    for n, (r, inputs) in enumerate(zip(requests, all_inputs), start=1):
+        base = r.seed if r.seed is not None else random.randrange(2**32)
+        bases.append(base)
+        which = f"#{n} " if len(requests) > 1 else ""
+        for i in range(r.count):
+            graph = run.tool.build(r, inputs.uploaded, base + i, context)
+            jobs.append(Job(r, inputs, i + 1, base + i, graph, f"[{len(jobs) + 1}/{total}] {which}seed {base + i}"))
+    run.prehash = start_prehash(run.hashes, [job.graph.nodes for job in jobs])
+    ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
+    pending: dict[str, Job] = {}
+    try:
+        for job in jobs:
+            pending[comfy.queue(job.graph)] = job
+        if len(requests) == 1:
+            status.line(f"queued {total} job{'s' if total > 1 else ''}: {run.tool.describe(requests[0], bases[0])}")
+        else:
+            status.line(f"queued {total} jobs for {len(requests)} requests:")
+            for n, (r, inputs, base) in enumerate(zip(requests, all_inputs, bases), start=1):
+                tags = f", tags {', '.join(r.tags)}" if r.tags else ""
+                status.line(f"  #{n} {inputs.names[0]}: {run.tool.describe(r, base)}{tags}")
+        wait(run, ws, pending, total)
+    except BaseException as e:
+        if pending:
+            what = "cancelling" if isinstance(e, KeyboardInterrupt) else "stopping"
+            status.line(f"\n{what}: dropping the queued jobs and interrupting the running one")
+            comfy.cancel(list(pending))
+        raise
+    finally:
+        ws.close()
+    return [result for job in jobs for result in job.results]
+
+
+def with_comfy(opts: Options, work: Callable[[Comfy], list], unit: str = "image") -> list:
     """Runs `work` against the ComfyUI at opts.server, starting one for the duration if none answers there, and
-    reports how many images it made."""
+    reports how many results (`unit`s) it made."""
     comfy = Comfy(opts.server)
     started = False
     if not comfy.alive():
@@ -964,8 +1079,41 @@ def with_comfy(opts: Options, work: Callable[[Comfy], list]) -> list:
         elif started:
             print("stopping the ComfyUI this run started")
             comfy.stop()
-    print(f"done: {len(made)} image{'' if len(made) == 1 else 's'} in {time.monotonic() - t0:.0f}s")
+    print(f"done: {len(made)} {unit}{'' if len(made) == 1 else 's'} in {time.monotonic() - t0:.0f}s")
     return made
+
+
+def settle(requests: Iterable[Settled]) -> list[Settled]:
+    """Every request settled, in order; a bad one is a ValueError that says which request."""
+    wanted = list(requests)
+    settled = []
+    for n, r in enumerate(wanted, start=1):
+        try:
+            settled.append(r.settled())
+        except ValueError as e:
+            raise ValueError(f"request {n} of {len(wanted)}: {e}" if len(wanted) > 1 else str(e)) from None
+    return settled
+
+
+def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options) -> list[Result]:
+    """Makes every request of a tool, all through one ComfyUI, and keeps the results in rope: a Result per result,
+    the requests in order and each request's results in seed order. Every request is settled first, so a bad one
+    (a ValueError) stops the batch before anything runs. A tool's run() wraps this; img2img.run() says what it
+    promises."""
+    settled = settle(requests)
+    if not settled:
+        return []
+    check_packages(tool.packages, tool.file)
+    lib = Library.find(opts.library)
+    for into in dict.fromkeys(r.into for r in settled if r.into):
+        # made now, so that a name rope refuses fails before the GPU work, and a typo shows up right here
+        if lib.call("mkdir", "-p", into)["created"]:
+            print(f"new rope folder {into}")
+    hashes = ModelHashes(lib.root / ".cache" / "model-sha256.json")
+    with tempfile.TemporaryDirectory(prefix=f"{tool.file.stem}-") as workdir:
+        all_inputs = prepare(settled, Path(workdir), lib, via=tool.name)
+        return with_comfy(opts, lambda comfy: run_jobs(Run(tool, comfy, lib, opts, Status(), keep_result, hashes),
+                                                       settled, all_inputs), tool.unit)
 
 
 # ---------------------------------------------------------------- cli
