@@ -13,6 +13,7 @@ mod app;
 mod decode;
 mod fonts;
 mod model;
+mod player;
 mod thumbs;
 
 use eframe::egui;

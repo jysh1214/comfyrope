@@ -1,9 +1,10 @@
 //! Looking at one image as large as the window allows: fitted to the window or at 100%, zoomed around the
 //! cursor, panned by dragging, stepping through the images of the current view, and trashing the ones not
-//! worth keeping on the way.
+//! worth keeping on the way. A clip plays, round and round, with Space to pause and a slider to seek.
 
 use super::{Action, App, Dialog};
 use crate::model::View;
+use crate::player::Player;
 use crate::thumbs::{self, Key, Source};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Vec2};
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,8 @@ pub(super) struct Viewer {
     /// follows it, so that marking a favorite, which moves the image to the front of the view, does not change
     /// which image comes next.
     pub order: Vec<String>,
+    /// Playing the clip being looked at, when it is one.
+    pub player: Option<Player>,
 }
 
 /// How far one press of + or - zooms.
@@ -65,7 +68,7 @@ impl App {
         self.selected = vec![id.clone()];
         self.anchor = Some(id.clone());
         self.load_detail(&id);
-        self.viewer = Some(Viewer { id, zoom: None, pan: Vec2::ZERO, info, fit: 1.0, order });
+        self.viewer = Some(Viewer { id, zoom: None, pan: Vec2::ZERO, info, fit: 1.0, order, player: None });
     }
 
     /// Goes back to the grid, scrolled to the image last looked at.
@@ -152,11 +155,28 @@ impl App {
                     actions.push(Action::ToggleFavorite(vec![v.id.clone()]));
                 }
                 ui.label(RichText::new(&item.name).strong());
-                let size = match (item.width, item.height) {
+                let mut size = match (item.width, item.height) {
                     (Some(w), Some(h)) => format!("{w}×{h}"),
                     _ => String::new(),
                 };
+                if let Some(d) = item.video.as_ref().and_then(|c| c.duration) {
+                    size = format!("{size}  {d:.1} s");
+                }
                 ui.label(RichText::new(format!("{}  {size}", rope_core::hash::short(&item.id))).weak());
+                if let Some(p) = &v.player {
+                    ui.separator();
+                    let (shown, total) = (p.shown.unwrap_or(0), p.total().max(1));
+                    let label = if p.paused.is_some() { "Play" } else { "Pause" };
+                    if ui.button(label).on_hover_text("play or pause (Space)").clicked() {
+                        actions.push(Action::PlayPause);
+                    }
+                    let mut at = shown.min(total - 1);
+                    if ui.add(egui::Slider::new(&mut at, 0..=total - 1).show_value(false)).changed() {
+                        actions.push(Action::Seek(at));
+                    }
+                    let time = format!("{} / {total}  {:.1} s", shown + 1, shown as f64 / p.fps);
+                    ui.label(RichText::new(time).weak());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.selectable_label(v.info, "Info").on_hover_text("the details panel (I)").clicked() {
                         actions.push(Action::ToggleInfo);
@@ -206,8 +226,13 @@ impl App {
             if k(egui::Key::ArrowLeft) || k(egui::Key::ArrowUp) {
                 actions.push(Action::Step(-1));
             }
-            if k(egui::Key::ArrowRight) || k(egui::Key::ArrowDown) || k(egui::Key::Space) {
+            if k(egui::Key::ArrowRight) || k(egui::Key::ArrowDown) {
                 actions.push(Action::Step(1));
+            }
+            if k(egui::Key::Space) {
+                // a clip pauses and plays on Space; for an image it is the next one, as the arrows are
+                let clip = self.viewer.as_ref().is_some_and(|v| v.player.is_some());
+                actions.push(if clip { Action::PlayPause } else { Action::Step(1) });
             }
             if k(egui::Key::F) {
                 actions.push(Action::Zoom(None));
@@ -254,7 +279,7 @@ impl App {
         let model = self.model.as_ref().expect("loaded");
         let item = &model.items[&id];
         let source = Source { file: item.file.clone(), fallback: item.fallback.clone() };
-        let dims = item.width.zip(item.height);
+        let mut dims = item.width.zip(item.height);
         // the neighbors first: the newest request is decoded first, and that must be this image
         for n in [self.neighbor(1), self.neighbor(-1)].into_iter().flatten() {
             if let Some(i) = model.items.get(&n) {
@@ -262,8 +287,21 @@ impl App {
                 self.thumbs.get(&Key { id: n, size: thumbs::VIEW }, || s);
             }
         }
+        // a clip plays: the frame the clock calls for, once ffmpeg has it; its poster frame until then
+        let mut full = None;
+        let mut cannot_play = false;
+        if let (Some(clip), Some((w, h))) = (&item.video, dims) {
+            let (file, fps, frames) = (item.file.clone(), clip.fps, clip.frames);
+            let v = self.viewer.as_mut().expect("checked");
+            let p = v.player.get_or_insert_with(|| Player::new(ui.ctx(), id.clone(), &file, w, h, fps, frames));
+            full = p.frame(ui.ctx());
+            dims = Some((p.size[0] as u32, p.size[1] as u32));
+            cannot_play = p.failed();
+        }
         // the full image, or a smaller one stretched to its size while it is decoded
-        let full = self.thumbs.get(&Key { id: id.clone(), size: thumbs::VIEW }, || source.clone());
+        if full.is_none() {
+            full = self.thumbs.get(&Key { id: id.clone(), size: thumbs::VIEW }, || source.clone());
+        }
         let shown = full
             .clone()
             .or_else(|| self.thumbs.get(&Key { id: id.clone(), size: thumbs::PREVIEW }, || source.clone()))
@@ -280,6 +318,15 @@ impl App {
             );
             return;
         };
+        if cannot_play {
+            ui.painter().text(
+                rect.center_bottom() - Vec2::new(0.0, 24.0),
+                egui::Align2::CENTER_CENTER,
+                "ffmpeg could not decode this clip; this is its poster frame",
+                egui::FontId::proportional(14.0),
+                Color32::GRAY,
+            );
+        }
         let size = image_size(dims, full.as_ref().map(|t| t.size_vec2()), tex.size_vec2());
         let fit = (rect.width() / size.x).min(rect.height() / size.y);
         let v = self.viewer.as_mut().expect("checked");

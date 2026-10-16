@@ -93,6 +93,9 @@ enum Action {
     Zoom(Option<f32>),
     ZoomBy(f32),
     ToggleInfo,
+    /// The clip being looked at: play or pause it, and go to one of its frames.
+    PlayPause,
+    Seek(usize),
     /// Mark these images as favorites, or, when all of them are already, unmark them.
     ToggleFavorite(Vec<String>),
     /// Edit the prompt with this id on the Prompts page.
@@ -501,6 +504,16 @@ impl App {
             Action::ToggleInfo => {
                 if let Some(v) = self.viewer.as_mut() {
                     v.info = !v.info;
+                }
+            }
+            Action::PlayPause => {
+                if let Some(p) = self.viewer.as_mut().and_then(|v| v.player.as_mut()) {
+                    p.toggle();
+                }
+            }
+            Action::Seek(frame) => {
+                if let Some(p) = self.viewer.as_mut().and_then(|v| v.player.as_mut()) {
+                    p.seek(frame);
                 }
             }
             Action::Undo => {
@@ -994,6 +1007,20 @@ impl App {
                 actions.push(Action::SaveName);
             }
         });
+        if let Some(c) = &m.video {
+            let mut bits = Vec::new();
+            if let Some(d) = c.duration {
+                bits.push(format!("{d:.1} s"));
+            }
+            if let Some(f) = c.fps {
+                bits.push(format!("{f} fps"));
+            }
+            if let Some(n) = c.frames {
+                bits.push(format!("{n} frames"));
+            }
+            bits.extend(c.codec.clone());
+            ui.label(RichText::new(format!("Clip: {}", bits.join(", "))).weak());
+        }
         let size = match (m.image.width, m.image.height) {
             (Some(w), Some(h)) => format!("{w}×{h}  "),
             _ => String::new(),
@@ -1750,6 +1777,20 @@ mod tests {
         let item = &app.model().items[&id];
         assert!(item.fallback.as_ref().is_some_and(|p| p.ends_with("poster.png")), "{:?}", item.fallback);
         assert_eq!(item.video.as_ref().and_then(|v| v.frames), Some(16));
+
+        // looking at it plays it: ffmpeg's frames come in, Space pauses, a seek lands on its frame, Esc ends it
+        app.apply(Action::Look(id.clone()), Some(&ctx));
+        let player =
+            |a: &App| a.viewer.as_ref().and_then(|v| v.player.as_ref()).map(|p| (p.shown, p.paused, p.total()));
+        frames_until(&ctx, &mut app, |a| player(a).is_some_and(|(shown, _, _)| shown.is_some()));
+        let p = app.viewer.as_ref().unwrap().player.as_ref().unwrap();
+        assert_eq!((p.size, p.fps, p.total()), ([64, 48], 16.0, 16));
+        press(&ctx, &mut app, egui::Key::Space);
+        assert!(player(&app).is_some_and(|(_, paused, _)| paused.is_some()), "{:?}", player(&app));
+        app.apply(Action::Seek(3), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| player(a).is_some_and(|(shown, _, _)| shown == Some(3)));
+        press(&ctx, &mut app, egui::Key::Escape);
+        assert!(app.viewer.is_none());
     }
 
     /// Draws frames until `done` holds, or fails after a few seconds.

@@ -139,12 +139,13 @@ The window runs on its own: the command returns at once, and closing the termina
 
 - Thumbnails of the folder chosen on the left, without the images in its subfolders: favorites first, then the newest first.
 - A star in a thumbnail's top-right corner marks it as a favorite: gold when it is one, an outline on hover otherwise. Click it, or press L.
+- A clip shows its first frame, with a play mark and its length in the bottom-left corner.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
 
 **Right**, the selected image:
 
-- A preview (click it for the large view), the favorite star, and the name, which you can edit.
+- A preview (click it for the large view), the favorite star, and the name, which you can edit; for a clip, its length, rate and codec.
 - Copy path, Copy repro, Copy command and Delete buttons.
 - Its folder, tags and note.
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2; click one to go to it. Made from this: how many images were made from this one; Show lists them in the grid, as Made from 〈name〉 on the left until you choose another view.
@@ -165,11 +166,12 @@ The window runs on its own: the command returns at once, and closing the termina
 | Esc | Clear the selection |
 | F5 | Reload |
 
-**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more.
+**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and the bar has a slider to go to a frame. Open externally hands a clip to the default video player.
 
 | Key or mouse | Action |
 |---|---|
-| ← → (or ↑ ↓, Space) | Previous / next image of the view. Images that arrive while looking (an `img2img.py` run finishing, an import) join in, where the view puts them |
+| ← → (or ↑ ↓) | Previous / next image of the view. Images that arrive while looking (an `img2img.py` run finishing, an import) join in, where the view puts them |
+| Space | Next image; for a clip, pause or play |
 | Ctrl+wheel | Zoom around the cursor |
 | Drag | Pan, when zoomed |
 | Double-click, 1 | 100%: one image pixel per screen pixel |
