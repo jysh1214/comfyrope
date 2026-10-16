@@ -7,7 +7,7 @@
 use crate::catalog::Catalog;
 use crate::hash::{self, short};
 use crate::meta::{self, ImageInfo, Meta, Source};
-use crate::{Library, atomic, journal, repro, time};
+use crate::{Library, atomic, journal, repro, time, video};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -27,10 +27,26 @@ const IMAGE_SUFFIXES: &[&str] = &[
     "qoi", "ico", "jp2",
 ];
 
+/// Suffixes rope takes as clips. A clip is kept like an image, with what ffprobe says about it and its first
+/// frame as `poster.png` (see `video`).
+pub const VIDEO_SUFFIXES: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
+/// The file name of a clip's first frame in its item directory.
+pub const POSTER: &str = "poster.png";
+
 /// Whether rope takes a file with this name as an image when walking a folder.
 pub fn looks_like_image(path: &Path) -> bool {
     let ext = suffix(path);
     IMAGE_SUFFIXES.contains(&ext.as_str()) || RAW_SUFFIXES.contains(&ext.as_str())
+}
+
+/// Whether rope takes a file with this name as a clip.
+pub fn looks_like_video(path: &Path) -> bool {
+    VIDEO_SUFFIXES.contains(&suffix(path).as_str())
+}
+
+/// An image or a clip, by name: what a folder walk picks up.
+pub fn looks_like_media(path: &Path) -> bool {
+    looks_like_image(path) || looks_like_video(path)
 }
 
 /// What to attach to a file being added.
@@ -77,13 +93,23 @@ fn assemble(lib: &Library, src: &Path, new: &NewImage, staging: &Path) -> Result
     let src_abs = std::path::absolute(src)?;
     let tmp = staging.join("image.tmp");
     let (sha, len) = hash::copy_hashed(src, &tmp)?;
-    let mut image = image_info(&tmp, len);
-    if new.made.is_some() {
+    // a clip is known by its suffix: imagesize takes an mp4 for a HEIF, both being ISO media files
+    let clip = looks_like_video(src);
+    let (mut image, video) = if clip {
+        let (image, video) = video::file_info(&tmp, len, Some(suffix(src)));
+        (image, Some(video))
+    } else {
+        (image_info(&tmp, len), None)
+    };
+    if new.made.is_some() && !clip {
         image.pixels = pixel_hash(&tmp).ok();
     }
     let file = format!("{}.{}", short(&sha), extension(src, image.format.as_deref()));
     fs::rename(&tmp, staging.join(&file))?;
     set_readonly(&staging.join(&file))?;
+    // the first frame, for thumbnails; without ffmpeg the clip is kept all the same, and check --fix tries again
+    let poster =
+        (clip && video::poster(&staging.join(&file), &staging.join(POSTER)).is_ok()).then(|| POSTER.to_owned());
     let now = time::now();
     let sources = if inside(lib, &src_abs) {
         Vec::new()
@@ -97,6 +123,8 @@ fn assemble(lib: &Library, src: &Path, new: &NewImage, staging: &Path) -> Result
         name: new.name.clone().unwrap_or_else(|| stem(src)),
         added: now,
         image,
+        video,
+        poster,
         sources,
         made: new.made.clone(),
         uploaded: Map::new(),
@@ -152,6 +180,22 @@ fn publish(lib: &Library, staging: &Path, meta: Meta, new: &NewImage) -> Result<
             old.made = meta.made.clone();
             old.image.pixels = meta.image.pixels.clone();
             write_recipe_files(&dest, &old, new.graph.as_ref())?;
+            changed = true;
+        }
+        // a clip kept by an older rope, or without ffprobe and ffmpeg then: now it is known for what it is
+        if meta.video.as_ref().is_some_and(|v| v.duration.is_some())
+            && old.video.as_ref().is_none_or(|v| v.duration.is_none())
+        {
+            old.video = meta.video.clone();
+            (old.image.width, old.image.height) = (meta.image.width, meta.image.height);
+            old.image.format = meta.image.format.clone();
+            changed = true;
+        }
+        if old.poster.as_ref().is_none_or(|p| !dest.join(p).exists())
+            && let Some(p) = &meta.poster
+        {
+            fs::copy(staging.join(p), dest.join(p))?;
+            old.poster = Some(p.clone());
             changed = true;
         }
         if changed {
@@ -230,6 +274,42 @@ pub fn add_rendition(lib: &Library, sha: &str, src: &Path, mut info: Value) -> R
     Ok((r_sha, dest))
 }
 
+/// Asks ffprobe and ffmpeg about a clip kept without its length or its poster frame (no ffmpeg then, or an
+/// older rope), and records what they say. Returns what was done; an error when they still cannot read it.
+pub fn probe_clip(lib: &Library, meta: &Meta) -> Result<String> {
+    let dir = lib.item_dir(&meta.sha256);
+    let file = dir.join(&meta.file);
+    let mut done = Vec::new();
+    let (image, video) = video::file_info(&file, meta.image.bytes, Some(suffix(&file)));
+    if video.duration.is_none() {
+        bail!("ffprobe cannot read the clip");
+    }
+    let had_poster = meta.poster.as_ref().is_some_and(|p| dir.join(p).exists());
+    if !had_poster {
+        let tmp = atomic::temp_path(&dir.join("poster"));
+        let made = video::poster(&file, &tmp);
+        if made.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        made?;
+        fs::rename(&tmp, dir.join(POSTER))?;
+        done.push("made its poster frame");
+    }
+    let _lock = lib.lock()?;
+    let mut m = Meta::load(&dir.join("meta.json"))?;
+    if m.video.as_ref().is_none_or(|v| v.duration.is_none()) {
+        done.push("read its length");
+    }
+    (m.image.width, m.image.height, m.image.format) = (image.width, image.height, image.format);
+    m.video = Some(video);
+    if !had_poster {
+        m.poster = Some(POSTER.to_owned());
+    }
+    atomic::write(&dir.join("meta.json"), &m.to_json())?;
+    journal::append(lib, "update", std::slice::from_ref(&meta.sha256))?;
+    Ok(done.join(" and "))
+}
+
 /// Stores an environment snapshot in `envs/`, once per distinct content, and returns its id.
 pub fn add_env(lib: &Library, env: &Value) -> Result<String> {
     let bytes = serde_json::to_vec(&canonical(env))?;
@@ -282,7 +362,7 @@ fn mirror_into(dir: &Path, folder: &str, out: &mut Vec<(PathBuf, String)>) {
         }
         if p.is_dir() {
             mirror_into(&p, &join(folder, &name), out);
-        } else if looks_like_image(&p) {
+        } else if looks_like_media(&p) {
             out.push((p, folder.to_owned()));
         }
     }

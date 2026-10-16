@@ -17,7 +17,8 @@ pub struct Report {
 
 /// Checks every item and the catalog. With `hash`, every stored file is hashed again. With `fix`, catalog
 /// entries for missing images are dropped, references to missing folders are cleared, stale scratch space is
-/// removed and outdated repro.sh files are written again; nothing is fixed by deleting an image.
+/// removed, outdated repro.sh files are written again and a clip missing its length or poster frame is asked
+/// about again; nothing is fixed by deleting an image.
 pub fn check(lib: &Library, hash: bool, fix: bool) -> Result<Report> {
     let mut r = Report::default();
     let (metas, unreadable) = store::scan(lib)?;
@@ -42,6 +43,24 @@ pub fn check(lib: &Library, hash: bool, fix: bool) -> Result<Report> {
                 r.problems.push(format!("{}: the uploaded file {} is missing", m.short(), short(rsha)));
             } else if hash && hash::sha256_file(&path)? != *rsha {
                 r.problems.push(format!("{}: the uploaded file {} no longer matches its hash", m.short(), short(rsha)));
+            }
+        }
+        if file.exists() && (m.is_clip() || store::looks_like_video(&file)) {
+            let poster = m.poster.as_ref().is_some_and(|p| dir.join(p).exists());
+            let length = m.video.as_ref().is_some_and(|v| v.duration.is_some());
+            if !poster || !length {
+                let what = match (poster, length) {
+                    (false, false) => "poster frame and length",
+                    (false, true) => "poster frame",
+                    _ => "length",
+                };
+                r.problems.push(format!("{}: the clip has no {what} (ffmpeg and ffprobe give them)", m.short()));
+                if fix {
+                    match store::probe_clip(lib, m) {
+                        Ok(done) => r.fixed.push(format!("{}: {done}", m.short())),
+                        Err(e) => r.problems.push(format!("{}: {e:#}", m.short())),
+                    }
+                }
             }
         }
         for (i, input) in m.inputs().iter().enumerate() {

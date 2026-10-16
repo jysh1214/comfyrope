@@ -18,6 +18,13 @@ pub struct Meta {
     pub name: String,
     pub added: String,
     pub image: ImageInfo,
+    /// Set for a clip (a video): its length, rate, frame count and codec, from ffprobe. `None` for an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoInfo>,
+    /// A clip's first frame as a PNG in the item directory (`poster.png`), for thumbnails; missing when ffmpeg
+    /// was not there to make it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
     /// Every path these bytes were seen at, outside the library. A record, never used to find the bytes.
     #[serde(default)]
     pub sources: Vec<Source>,
@@ -54,6 +61,21 @@ pub struct ImageInfo {
     pub pixels: Option<String>,
 }
 
+/// What ffprobe says about a clip; each field is `None` when it could not say.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VideoInfo {
+    /// Seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    /// ffprobe's name for it: "h264", "vp9", ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
     pub path: String,
@@ -87,6 +109,11 @@ impl Meta {
 
     pub fn short(&self) -> &str {
         crate::hash::short(&self.sha256)
+    }
+
+    /// Whether this is a clip, not an image.
+    pub fn is_clip(&self) -> bool {
+        self.video.is_some()
     }
 
     /// The inputs of the recipe, in order; empty for an image nothing made.

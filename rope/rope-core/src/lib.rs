@@ -1,5 +1,5 @@
-//! rope keeps images by content hash. Each image carries its own metadata: where it came from, the recipe that
-//! made it, and a note. One catalog holds the folders, the tags and the trash.
+//! rope keeps images, and the clips made from them, by content hash. Each carries its own metadata: where it came
+//! from, the recipe that made it, and a note. One catalog holds the folders, the tags and the trash.
 //!
 //! On disk, under the library root (by default `~/.local/share/rope`):
 //!
@@ -13,7 +13,8 @@
 //! run.lock             img2img.py holds it shared while it brings its inputs in; purge takes it exclusive
 //! runs/<pid>.json      the images each img2img.py run in progress uses, locked by it while it lasts
 //! envs/<id>.json       environment snapshots, one per distinct environment
-//! items/ab/<sha256>/   one image: <sha12>.<ext> (read-only), meta.json, graph.json, repro.sh, note.txt, uploaded/
+//! items/ab/<sha256>/   one image or clip: <sha12>.<ext> (read-only), meta.json, graph.json, repro.sh, note.txt,
+//!                      uploaded/, and for a clip poster.png, its first frame
 //! tmp/                 items being assembled; a complete one is renamed into items/
 //! .cache/              thumbnails; safe to delete
 //! ```
@@ -32,6 +33,7 @@ pub mod repro;
 pub mod runs;
 pub mod store;
 pub mod time;
+pub mod video;
 
 pub use catalog::Catalog;
 pub use library::Library;

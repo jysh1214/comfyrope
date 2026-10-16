@@ -2959,6 +2959,7 @@ dependencies = [
  "anyhow",
  "clap",
  "imagesize",
+ "libc",
  "rope-core",
  "serde_json",
 ]

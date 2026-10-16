@@ -2,6 +2,7 @@
 //! library by reading the journal, which every writer appends to.
 
 use anyhow::Result;
+use rope_core::meta::VideoInfo;
 use rope_core::prompts::Prompts;
 use rope_core::store::RAW_SUFFIXES;
 use rope_core::{Catalog, Library, Meta, journal, store};
@@ -28,8 +29,10 @@ pub struct Item {
     pub name: String,
     pub added: String,
     pub file: PathBuf,
-    /// A converted copy to show when `file` cannot be decoded here (camera RAW).
+    /// What to decode when `file` cannot be decoded here: a clip's poster frame, a camera RAW photo's converted PNG.
     pub fallback: Option<PathBuf>,
+    /// Set for a clip: its length and rate.
+    pub video: Option<VideoInfo>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub made: bool,
@@ -44,10 +47,13 @@ impl Item {
     fn new(lib: &Library, m: &Meta) -> Item {
         let dir = lib.item_dir(&m.sha256);
         let raw = m.file.rsplit('.').next().is_some_and(|e| RAW_SUFFIXES.contains(&e));
-        let fallback = raw
-            .then(|| m.uploaded.values().find_map(|u| u.get("file").and_then(Value::as_str)))
-            .flatten()
-            .map(|f| dir.join("uploaded").join(f));
+        let fallback = match &m.poster {
+            Some(p) => Some(dir.join(p)),
+            None => raw
+                .then(|| m.uploaded.values().find_map(|u| u.get("file").and_then(Value::as_str)))
+                .flatten()
+                .map(|f| dir.join("uploaded").join(f)),
+        };
         let prompt = m.made_str("prompt").unwrap_or_default();
         Item {
             id: m.sha256.clone(),
@@ -55,6 +61,7 @@ impl Item {
             added: m.added.clone(),
             file: dir.join(&m.file),
             fallback,
+            video: m.video.clone(),
             width: m.image.width,
             height: m.image.height,
             made: m.made.is_some(),

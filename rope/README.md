@@ -1,6 +1,6 @@
 # rope: an image library that remembers where each image came from and how it was made
 
-rope keeps images by the hash of their content. Each image carries its own metadata:
+rope keeps images, and the clips made from them, by the hash of their content. Each carries its own metadata:
 
 - **sources**: the paths its file was seen at; there can be several.
 - **recipe**: for an image a tool made, the command, the workflow sent to ComfyUI, and the input images, in order.
@@ -69,8 +69,9 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 ├── REPO                 # where the comfyrope repo was last seen, for repro.sh
 ├── envs/<id>.json       # environment snapshots, shared by every image made in the same environment
 ├── items/3f/<sha256>/   # one folder per image, named after the SHA-256 of its file
-│   ├── 3fa9c1e27b0d.png # the image: 12 hex digits of the hash plus its suffix; read-only, never rewritten
-│   ├── meta.json        # name, sources, recipe, upstream images
+│   ├── 3fa9c1e27b0d.png # the image (or clip): 12 hex digits of the hash plus its suffix; read-only, never rewritten
+│   ├── poster.png       # for a clip: its first frame, for thumbnails; made with ffmpeg
+│   ├── meta.json        # name, sources, recipe, upstream images; for a clip its length, rate and codec
 │   ├── graph.json       # the API workflow sent to ComfyUI
 │   ├── repro.sh         # generated from meta.json; no absolute paths
 │   ├── note.txt
@@ -82,6 +83,7 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 ```
 
 - `meta.json`, `catalog.json` and `note.txt` are plain text: grep them, or edit them by hand.
+- Clips (mp4, m4v, mov, webm, mkv) are kept like images. Their size, length and poster frame come from the `ffprobe` and `ffmpeg` on the system; without them a clip is kept all the same, and `rope check --fix` asks again once they are there.
 - Image files in `items/` never move. Organizing changes only `catalog.json`, so a copied path stays valid.
 
 An image's id is the SHA-256 of its file:
@@ -98,7 +100,7 @@ An image's id is the SHA-256 of its file:
 | `rope mv trips/京都 travel/京都` | Rename or move a folder |
 | `rope mv @3fa9c1 @9b2e0f portraits` | Move images into a folder; `/` is unfiled |
 | `rope rmdir [-r] F` | Remove an empty folder; with `-r`, a folder with everything in it: its subfolders go, and its images move to the trash (restored, they come back unfiled) |
-| `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image in a folder recursively, all into F, made if there is none; `--tag` repeats |
+| `rope import PATH... [--into F] [--tag T]... [--note T]` | Import files, or every image and clip in a folder recursively, all into F, made if there is none; `--tag` repeats |
 | `rope import --tree DIR... [--into F]` | Make each disk folder a rope folder of the same name, with its subfolders, in F or at the top |
 | `rope ls [F] [-r] [-l] [--tag T] [--fav] [--trash]` | List a folder; without F, the unfiled images. Favorites are marked ★ |
 | `rope tree` | The folder tree with image counts, and every tag |
@@ -113,7 +115,7 @@ An image's id is the SHA-256 of its file:
 | `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full `img2img.py` command, to change and run as a variation |
 | `rope rm ID...`, `rope restore ID...` | Move images to the trash, or back out |
 | `rope purge ID... \| --trash [--break-lineage]` | Delete for good; see [Deleting](#deleting) |
-| `rope check [--hash] [--fix]` | Check the library; `--hash` verifies every file against its hash |
+| `rope check [--hash] [--fix]` | Check the library; `--hash` verifies every file against its hash; `--fix` repairs the catalog, writes outdated `repro.sh` again and makes a clip's missing poster frame and length |
 | `rope log [ID]` | The latest changes |
 
 Every command takes `--json` for scripts.

@@ -307,6 +307,11 @@ enum PromptCmd {
 }
 
 fn main() {
+    // a reader that stops early (rope tree | head) ends the command quietly, as other Unix tools do
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
         eprintln!("rope: {e:#}");
@@ -520,8 +525,8 @@ fn collect_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         if p.is_dir() {
             walk(p, &mut out)?;
         } else if p.is_file() {
-            if !store::looks_like_image(p) && imagesize::size(p).is_err() {
-                bail!("{} does not look like an image", p.display());
+            if !store::looks_like_media(p) && imagesize::size(p).is_err() {
+                bail!("{} does not look like an image or a clip", p.display());
             }
             out.push(p.clone());
         } else {
@@ -540,7 +545,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
         if p.is_dir() {
             walk(&p, out)?;
-        } else if store::looks_like_image(&p) {
+        } else if store::looks_like_media(&p) {
             out.push(p);
         }
     }
@@ -679,15 +684,18 @@ fn ls(
         let when = m.added.get(..16).unwrap_or(&m.added).replace('T', " ");
         if long {
             let e = catalog.entry(&m.sha256);
-            let size = match (m.image.width, m.image.height) {
+            let mut size = match (m.image.width, m.image.height) {
                 (Some(w), Some(h)) => format!("{w}x{h}"),
                 _ => "?".into(),
             };
+            if let Some(d) = m.video.as_ref().and_then(|v| v.duration) {
+                size = format!("{size} {d:.0}s");
+            }
             let place = e.folder.map(|f| catalog.folder_path(&f)).unwrap_or_else(|| "/".into());
             let tags = if e.tags.is_empty() { String::new() } else { format!("  #{}", e.tags.join(" #")) };
             let made = if m.made.is_some() { "made" } else { "    " };
             let star = if e.favorite { "★ " } else { "" };
-            println!("{}  {when}  {size:>9}  {made}  {star}{}  [{place}]{tags}", m.short(), m.name);
+            println!("{}  {when}  {size:>12}  {made}  {star}{}  [{place}]{tags}", m.short(), m.name);
         } else {
             let star = if catalog.is_favorite(&m.sha256) { "★ " } else { "" };
             println!("{}  {when}  {star}{}", m.short(), m.name);
@@ -796,11 +804,35 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
         _ => String::new(),
     };
     println!(
-        "  image    {size}{} {}, added {}",
+        "  {}    {size}{} {}, added {}",
+        if meta.is_clip() { "clip " } else { "image" },
         meta.image.format.as_deref().unwrap_or("?"),
         human(meta.image.bytes),
         meta.added.replace('T', " ")
     );
+    if let Some(v) = &meta.video {
+        let mut bits = Vec::new();
+        if let Some(d) = v.duration {
+            bits.push(format!("{d:.1} s"));
+        }
+        if let Some(f) = v.fps {
+            let f = format!("{f:.2}");
+            bits.push(format!("{} fps", f.trim_end_matches('0').trim_end_matches('.')));
+        }
+        if let Some(n) = v.frames {
+            bits.push(format!("{n} frames"));
+        }
+        if let Some(c) = &v.codec {
+            bits.push(c.clone());
+        }
+        if bits.is_empty() {
+            bits.push("length unknown: ffprobe was not there".into());
+        }
+        if meta.poster.is_none() {
+            bits.push("no poster frame".into());
+        }
+        println!("  length   {}", bits.join(", "));
+    }
     println!(
         "  folder   {}",
         entry.folder.as_ref().map(|f| catalog.folder_path(f)).unwrap_or_else(|| "/ (unfiled)".into())

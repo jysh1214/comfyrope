@@ -293,3 +293,68 @@ fn a_disk_folder_becomes_a_rope_folder_with_its_subfolders() {
     assert!(again.iter().all(|(_, r)| r.as_ref().is_ok_and(|a| !a.created)));
     assert_eq!(Catalog::load(&lib).unwrap().folders.len(), 3);
 }
+
+/// A one-second test clip, 64x48 at 16 fps, made with the ffmpeg on the system; None without one.
+fn clip(dir: &Path, name: &str) -> Option<PathBuf> {
+    let path = dir.join(name);
+    let made = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=16",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&path)
+        .status()
+        .is_ok_and(|s| s.success());
+    made.then_some(path)
+}
+
+#[test]
+fn a_clip_is_kept_with_its_length_and_its_first_frame_and_check_fix_restores_them() {
+    let (dir, lib) = library();
+    let Some(path) = clip(dir.path(), "clip.mp4") else {
+        eprintln!("no ffmpeg here: the clip test is skipped");
+        return;
+    };
+    assert!(store::looks_like_video(&path) && !store::looks_like_image(&path) && store::looks_like_media(&path));
+    let sha = made_from(&lib, &path, &[]);
+    let meta = store::load(&lib, &sha).unwrap();
+    assert!(meta.is_clip() && meta.image.pixels.is_none(), "a clip has no pixel hash");
+    assert_eq!((meta.image.width, meta.image.height, meta.image.format.as_deref()), (Some(64), Some(48), Some("mp4")));
+    let v = meta.video.clone().unwrap();
+    assert_eq!((v.fps, v.frames, v.codec.as_deref()), (Some(16.0), Some(16), Some("h264")));
+    assert!((v.duration.unwrap() - 1.0).abs() < 0.1, "{v:?}");
+    let poster = lib.item_dir(&sha).join("poster.png");
+    assert_eq!(meta.poster.as_deref(), Some("poster.png"));
+    let frame = image::open(&poster).unwrap();
+    assert_eq!((frame.width(), frame.height()), (64, 48));
+
+    // the poster gone: check says so, and --fix makes it again
+    fs::remove_file(&poster).unwrap();
+    let report = rope_core::check::check(&lib, false, false).unwrap();
+    assert!(report.problems.iter().any(|p| p.contains("no poster frame")), "{:?}", report.problems);
+    let report = rope_core::check::check(&lib, false, true).unwrap();
+    assert!(report.fixed.iter().any(|f| f.contains("poster")), "{:?}", report.fixed);
+    assert!(poster.exists() && store::load(&lib, &sha).unwrap().poster.is_some());
+    assert!(rope_core::check::check(&lib, false, false).unwrap().problems.is_empty());
+
+    // a clip kept by an older rope as an image, with no length: --fix reads it
+    let item = lib.item_dir(&sha);
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(item.join("meta.json")).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("video");
+    json["image"]["format"] = json!("heif");
+    fs::write(item.join("meta.json"), serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    let report = rope_core::check::check(&lib, false, true).unwrap();
+    assert!(report.fixed.iter().any(|f| f.contains("length")), "{:?}", report.fixed);
+    let meta = store::load(&lib, &sha).unwrap();
+    assert_eq!(meta.image.format.as_deref(), Some("mp4"));
+    assert_eq!(meta.video.and_then(|v| v.frames), Some(16));
+}

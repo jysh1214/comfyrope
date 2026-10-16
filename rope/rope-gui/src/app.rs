@@ -21,9 +21,9 @@ const NO_RECIPE: &str = "no recipe: rope did not see this image being made, so t
 const THUMB: f32 = 168.0;
 const LABEL: f32 = 22.0;
 const SMALL: f32 = 72.0;
-const IMAGE_SUFFIXES: &[&str] = &[
+const MEDIA_SUFFIXES: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "avif", "jxl", "psd", "dng", "cr2",
-    "cr3", "nef", "arw", "raf", "orf", "rw2",
+    "cr3", "nef", "arw", "raf", "orf", "rw2", "mp4", "m4v", "mov", "webm", "mkv",
 ];
 
 struct Detail {
@@ -546,7 +546,7 @@ impl App {
         let picked: Vec<PathBuf> = if folders {
             dialog.pick_folders().unwrap_or_default()
         } else {
-            dialog.add_filter("Images", IMAGE_SUFFIXES).pick_files().unwrap_or_default()
+            dialog.add_filter("Images and clips", MEDIA_SUFFIXES).pick_files().unwrap_or_default()
         };
         if !picked.is_empty() {
             self.import_paths(picked, folders, ctx);
@@ -813,6 +813,7 @@ impl App {
         let square = Rect::from_min_size(rect.min, Vec2::splat(THUMB)).shrink(4.0);
         let key = Key { id: id.to_owned(), size: thumbs::GRID };
         let (file, fallback) = (item.file.clone(), item.fallback.clone());
+        let clip = item.video.as_ref().map(|v| v.duration.unwrap_or(0.0));
         match self.thumbs.get(&key, || Source { file, fallback }) {
             Some(tex) => {
                 let fitted = fit(tex.size_vec2(), square.size());
@@ -828,6 +829,19 @@ impl App {
                     visuals.weak_text_color(),
                 );
             }
+        }
+        if let Some(seconds) = clip {
+            // a clip, not a still: a play mark with its length, bottom left of the poster frame
+            let painter = ui.painter();
+            let text = painter.layout_no_wrap(format!("{seconds:.0} s"), FontId::proportional(12.0), Color32::WHITE);
+            let (pad, tri) = (Vec2::new(5.0, 2.0), 8.0);
+            let size = Vec2::new(text.size().x + tri + 3.0 * pad.x, text.size().y + 2.0 * pad.y);
+            let badge = Rect::from_min_size(egui::pos2(square.min.x + 4.0, square.max.y - size.y - 4.0), size);
+            painter.rect_filled(badge, 3.0, Color32::from_black_alpha(150));
+            let (x, mid) = (badge.min.x + pad.x, badge.center().y);
+            let points = vec![egui::pos2(x, mid - tri / 2.0), egui::pos2(x + tri, mid), egui::pos2(x, mid + tri / 2.0)];
+            painter.add(egui::Shape::convex_polygon(points, Color32::WHITE, egui::Stroke::NONE));
+            painter.galley(egui::pos2(x + tri + pad.x, badge.min.y + pad.y), text, Color32::WHITE);
         }
         let favorite = self.model.as_ref().is_some_and(|m| m.catalog.is_favorite(id));
         let star_rect = Rect::from_min_size(egui::pos2(square.max.x - 26.0, square.min.y + 4.0), Vec2::splat(22.0));
@@ -1685,7 +1699,7 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
                 collect(&p, out);
             }
         }
-    } else if store::looks_like_image(path) {
+    } else if store::looks_like_media(path) {
         out.push(path.to_path_buf());
     }
 }
@@ -1711,6 +1725,31 @@ mod tests {
         let path = dir.join(name);
         image::RgbImage::from_fn(300, 200, |x, y| image::Rgb([seed, x as u8, y as u8])).save(&path).unwrap();
         path
+    }
+
+    /// A clip's thumbnail is its poster frame, which ffmpeg made when it came in.
+    #[test]
+    fn a_clip_shows_its_first_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=16", "-t", "1"])
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            eprintln!("no ffmpeg here: the clip test is skipped");
+            return;
+        }
+        let id = store::add(&lib, &clip, &NewImage { via: "import".into(), ..Default::default() }).unwrap().sha;
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: id.clone(), size: thumbs::GRID }));
+        let item = &app.model().items[&id];
+        assert!(item.fallback.as_ref().is_some_and(|p| p.ends_with("poster.png")), "{:?}", item.fallback);
+        assert_eq!(item.video.as_ref().and_then(|v| v.frames), Some(16));
     }
 
     /// Draws frames until `done` holds, or fails after a few seconds.
