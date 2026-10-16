@@ -166,7 +166,7 @@ The window runs on its own: the command returns at once, and closing the termina
 | Esc | Clear the selection |
 | F5 | Reload |
 
-**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and the bar has a slider to go to a frame. Open externally hands a clip to the default video player.
+**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and a bar under the clip has Play/Pause, a progress bar across the width, which also shows how much of the clip is decoded yet, and the position; click or drag the progress bar to go to a frame. Open externally hands a clip to the default video player.
 
 | Key or mouse | Action |
 |---|---|

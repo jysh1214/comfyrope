@@ -115,6 +115,11 @@ impl Player {
         self.texture.clone()
     }
 
+    /// How many frames ffmpeg has decoded so far.
+    pub fn decoded(&self) -> usize {
+        self.shared.frames.lock().unwrap().len()
+    }
+
     /// How many frames there are to play through: the clip's, as far as known yet.
     pub fn total(&self) -> usize {
         let have = self.shared.frames.lock().unwrap().len();

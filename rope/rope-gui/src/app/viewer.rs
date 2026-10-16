@@ -1,6 +1,6 @@
 //! Looking at one image as large as the window allows: fitted to the window or at 100%, zoomed around the
 //! cursor, panned by dragging, stepping through the images of the current view, and trashing the ones not
-//! worth keeping on the way. A clip plays, round and round, with Space to pause and a slider to seek.
+//! worth keeping on the way. A clip plays, round and round, with Space to pause and a bar below it to scrub.
 
 use super::{Action, App, Dialog};
 use crate::model::View;
@@ -29,6 +29,9 @@ pub(super) struct Viewer {
 
 /// How far one press of + or - zooms.
 const STEP: f32 = 1.25;
+
+/// The height of a clip's bar, in points; the track drawn in it is thinner, the knob a little wider.
+const BAR_HEIGHT: f32 = 22.0;
 
 impl Viewer {
     /// Takes into the order the images of `visible` that are not in it yet: the results of an img2img.py run
@@ -124,6 +127,7 @@ impl App {
         self.viewer_keys(ctx, actions);
         let Some(v) = &self.viewer else { return };
         let (place, total) = (self.place(), self.order().len());
+        let clip = v.player.is_some();
         let favorite = self.model().catalog.is_favorite(&v.id);
         let item = &self.model().items[&v.id];
         egui::TopBottomPanel::top("viewer-bar").show(ctx, |ui| {
@@ -163,20 +167,6 @@ impl App {
                     size = format!("{size}  {d:.1} s");
                 }
                 ui.label(RichText::new(format!("{}  {size}", rope_core::hash::short(&item.id))).weak());
-                if let Some(p) = &v.player {
-                    ui.separator();
-                    let (shown, total) = (p.shown.unwrap_or(0), p.total().max(1));
-                    let label = if p.paused.is_some() { "Play" } else { "Pause" };
-                    if ui.button(label).on_hover_text("play or pause (Space)").clicked() {
-                        actions.push(Action::PlayPause);
-                    }
-                    let mut at = shown.min(total - 1);
-                    if ui.add(egui::Slider::new(&mut at, 0..=total - 1).show_value(false)).changed() {
-                        actions.push(Action::Seek(at));
-                    }
-                    let time = format!("{} / {total}  {:.1} s", shown + 1, shown as f64 / p.fps);
-                    ui.label(RichText::new(time).weak());
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.selectable_label(v.info, "Info").on_hover_text("the details panel (I)").clicked() {
                         actions.push(Action::ToggleInfo);
@@ -207,6 +197,13 @@ impl App {
                 .resizable(true)
                 .default_width(380.0)
                 .show(ctx, |ui| self.details(ui, actions));
+        }
+        if clip {
+            egui::TopBottomPanel::bottom("viewer-clip").show(ctx, |ui| {
+                if let Some(p) = self.viewer.as_ref().and_then(|v| v.player.as_ref()) {
+                    clip_bar(ui, p, actions);
+                }
+            });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_gray(18)))
@@ -377,6 +374,54 @@ impl App {
     }
 }
 
+/// Under a clip: Play/Pause, the progress bar across the width, and the position. The bar shows how far the
+/// clip is and how much of it ffmpeg has decoded so far, and goes to the frame it is clicked or dragged to, the
+/// frame following the pointer while the button is down.
+fn clip_bar(ui: &mut egui::Ui, p: &Player, actions: &mut Vec<Action>) {
+    let (shown, have, total) = (p.shown.unwrap_or(0), p.decoded(), p.total().max(1));
+    ui.horizontal(|ui| {
+        let label = if p.paused.is_some() { "Play" } else { "Pause" };
+        if ui.button(label).on_hover_text("play or pause (Space)").clicked() {
+            actions.push(Action::PlayPause);
+        }
+        // the position goes right, in the room its widest value takes, so the bar does not shift as digits change
+        let time = |i: usize| format!("{} / {total}  {:.1} s", i + 1, i as f64 / p.fps);
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let width = ui.painter().layout_no_wrap(time(total - 1), font, Color32::WHITE).size().x;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let size = Vec2::new(width, BAR_HEIGHT);
+            ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(RichText::new(time(shown)).weak());
+            });
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width().max(1.0), BAR_HEIGHT), Sense::click_and_drag());
+            let track = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 6.0));
+            let x = |i: usize| track.left() + track.width() * i as f32 / (total - 1).max(1) as f32;
+            let painter = ui.painter();
+            painter.rect_filled(track, 3.0, Color32::from_gray(60));
+            if have > 0 {
+                painter.rect_filled(track.with_max_x(x(have - 1)), 3.0, Color32::from_gray(100)); // decoded so far
+            }
+            painter.rect_filled(track.with_max_x(x(shown)), 3.0, ui.visuals().selection.bg_fill);
+            let held = resp.hovered() || resp.dragged();
+            let knob = Pos2::new(x(shown), track.center().y);
+            painter.circle_filled(knob, if held { 8.0 } else { 6.0 }, Color32::from_gray(if held { 255 } else { 220 }));
+            if resp.is_pointer_button_down_on()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                actions.push(Action::Seek(frame_at(pos.x, track, total)));
+            }
+        });
+    });
+}
+
+/// The frame the bar's point `x` stands for, of `total` (at least 1): the track's ends are the first and the
+/// last frame, and so is anything beyond them, where a drag may go.
+fn frame_at(x: f32, track: Rect, total: usize) -> usize {
+    let t = ((x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
+    ((t * (total - 1) as f32).round() as usize).min(total - 1)
+}
+
 /// The size to show an image at, in its own pixels: its real size, as far as the texture holds it, or the
 /// texture's size when that is all there is.
 fn image_size(dims: Option<(u32, u32)>, full: Option<Vec2>, shown: Vec2) -> Vec2 {
@@ -411,6 +456,17 @@ mod tests {
         let before = (anchor - center) / 0.5;
         let after = (anchor - new) / 2.0;
         assert!((before - after).length() < 1e-4);
+    }
+
+    #[test]
+    fn the_bar_ends_are_the_first_and_last_frame_and_so_is_beyond_them() {
+        let track = Rect::from_min_max(Pos2::new(100.0, 0.0), Pos2::new(300.0, 6.0));
+        assert_eq!(frame_at(100.0, track, 81), 0);
+        assert_eq!(frame_at(300.0, track, 81), 80);
+        assert_eq!(frame_at(200.0, track, 81), 40);
+        assert_eq!(frame_at(20.0, track, 81), 0);
+        assert_eq!(frame_at(500.0, track, 81), 80);
+        assert_eq!(frame_at(250.0, track, 1), 0);
     }
 
     #[test]
