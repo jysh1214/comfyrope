@@ -233,7 +233,7 @@ When things go wrong:
 
 ## Reproducing an image
 
-Copy repro and `rope repro ID` both give `img2img.py --replay ID`. Each image's `repro.sh` runs the same command. It finds the library from its own location and img2img from the library's `REPO` file, so moving the inputs, the repo or the library does not break it.
+Copy repro and `rope repro ID` both give `img2img.py --replay ID`, or `img2vid.py --replay ID` for a clip: the tool that made the item, by its recipe. Each item's `repro.sh` runs the same command. It finds the library from its own location and the repo from the library's `REPO` file, so moving the inputs, the repo or the library does not break it.
 
 `--replay` does this, in order:
 
@@ -241,9 +241,9 @@ Copy repro and `rope repro ID` both give `img2img.py --replay ID`. Each image's 
 2. It also lists what else differs from then: ComfyUI and package versions, and model files whose content is not what it was (by SHA-256, so a download of the same file again is not reported).
 3. For 2.1 with `--enhance`, it reuses the prompt the enhancer wrote then and skips the enhancer, which samples and would most likely write a different prompt. `--rerun-enhancer` runs it again.
 4. It uploads the inputs under new names. Otherwise a ComfyUI process that has seen the exact same workflow answers from its cache and recomputes nothing.
-5. It compares the decoded pixels, not the files:
+5. For an image it compares the decoded pixels, not the files; for a clip, whose encoder's output rope does not decode, the bytes:
    - Identical: recorded as `identical` in the original's replays.
-   - Different: kept as a new image next to the original, with the largest difference and the share of differing pixels.
+   - Different: kept as a new image or clip next to the original; for an image with the largest difference and the share of differing pixels.
 
 `-s N` changes only the seed. `--dry-run` prints the differences and the workflow without using the GPU.
 

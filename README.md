@@ -304,7 +304,7 @@ Replay an image's record:
 ./img2img.py --replay 3fa9c1 --dry-run
 ```
 
-`rope-gui`'s Copy repro button, `rope repro ID` and the `repro.sh` that rope keeps with each image all run this same command. Before sending, the replay says what differs from when the image was made. It sends the recorded workflow on the recorded input bytes, then compares the pixels: an identical result is only noted, and a different one is kept next to the original. [rope/README.md](rope/README.md#reproducing-an-image) has the details.
+`rope-gui`'s Copy repro button, `rope repro ID` and the `repro.sh` that rope keeps with each image all run this same command. Before sending, the replay says what differs from when the image was made. It sends the recorded workflow on the recorded input bytes, then compares the pixels: an identical result is only noted, and a different one is kept next to the original. [rope/README.md](rope/README.md#reproducing-an-image) has the details. `img2vid.py --replay ID` does the same for a clip, comparing the bytes.
 
 ### Input formats
 
@@ -468,11 +468,12 @@ The clip keeps the start image's aspect ratio, scaled so that its long side is `
 | `--lora FILE[:STRENGTH]` | An extra LoRA from `models/loras`, applied to both models; repeatable |
 | `--negative TEXT` | The negative prompt (default: Wan's own, in Chinese); has an effect only when cfg is above 1 |
 | `--into FOLDER`, `--tag TAG`, `--note TEXT` | The rope folder for the clips (made if there is none; default: unfiled), tags and a note, as `img2img.py`'s |
+| `--replay ID` | Make a rope clip again from its record, as `img2img.py --replay` does for an image, except that the new clip is compared byte for byte; `--replay ID --help` lists its own options |
 | `--library DIR`, the ComfyUI options | As `img2img.py`'s |
 
 From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, **options)` returns a `Result` per clip, as `img2img.run()` does, with `id`, `path`, `folder`, `width`, `height` and `seconds`. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, LoRAs) and a `batch()`; each combination's clips go into a rope folder named after it, so `--list` and a run work the same way.
 
-**Not there yet.** A clip cannot be made again the way an image can (`--replay` is `img2img.py`'s); rope keeps its recipe, so it will be. Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
+**Not there yet.** Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
 
 ## The image library: rope
 

@@ -557,14 +557,27 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 fn replayed(lib: &Library, json: bool, id: &str, file: &Path, made: &Path, graph: Option<&Path>) -> Result<()> {
     let sha = store::resolve(lib, id)?;
     let orig = store::load(lib, &sha)?;
-    let cmp = store::compare_pixels(&store::image_path(lib, &orig), file)?;
+    // an image is compared pixel by pixel; a clip byte by byte, since its encoder's output is not decoded here
+    let bytes = orig.is_clip();
+    let cmp = if bytes {
+        let same = rope_core::hash::sha256_file(file)? == sha;
+        let (max_diff, differing) = if same { (0, 0.0) } else { (255, 1.0) };
+        store::Comparison { identical: same, same_size: same, max_diff, differing }
+    } else {
+        store::compare_pixels(&store::image_path(lib, &orig), file)?
+    };
     let mut made = with_env_stored(lib, read_json(made)?)?;
     let mut record = json!({
         "at": time::now(),
         "result": if cmp.identical { "identical" } else { "differs" },
-        "same_size": cmp.same_size, "max_diff": cmp.max_diff, "differing": cmp.differing,
+        "compared": if bytes { "bytes" } else { "pixels" },
         "env": made.get("env"), "code": made.get("code"),
     });
+    if !bytes {
+        record["same_size"] = json!(cmp.same_size);
+        record["max_diff"] = json!(cmp.max_diff);
+        record["differing"] = json!(cmp.differing);
+    }
     if !cmp.identical {
         made["replay_of"] = json!(sha);
         let catalog = Catalog::load(lib)?;
@@ -572,7 +585,7 @@ fn replayed(lib: &Library, json: bool, id: &str, file: &Path, made: &Path, graph
             name: Some(format!("{} (replay)", orig.name)),
             made: Some(made),
             graph: graph.map(read_json).transpose()?,
-            via: "img2img.py".into(),
+            via: orig.tool().to_owned(),
             folder: Some(catalog.entry(&sha).folder),
             ..Default::default()
         };
@@ -586,7 +599,13 @@ fn replayed(lib: &Library, json: bool, id: &str, file: &Path, made: &Path, graph
     };
     emit(json, record.clone(), || {
         if cmp.identical {
-            println!("identical to {}", orig.short());
+            println!("identical to {}{}", orig.short(), if bytes { ", byte for byte" } else { "" });
+        } else if bytes {
+            println!(
+                "differs from {} (other bytes); kept as {}",
+                orig.short(),
+                short(record["id"].as_str().unwrap_or("?"))
+            );
         } else {
             println!(
                 "differs from {}: max difference {} of 255 in {:.2}% of the pixels; kept as {}",

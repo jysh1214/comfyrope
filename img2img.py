@@ -56,20 +56,16 @@ import argparse
 import copy
 import json
 import os
-import re
 import shlex
 import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 
-from comfycore import (FETCH, HERE, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Comfy, ComfyError, Error, Graph, Inputs, Job,
-                       Library, ModelHashes, Options, Result, Run, Status, Tool, add_comfy_args, add_loras,
-                       check_packages, code_identity, comfy_env, die, exact, fresh_tag, link, model_files, parse_lora,
-                       prepare, recipe, rope_ref, run_requests, send_result, start_prehash, upload_name, wait,
-                       with_comfy)
+from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Comfy, ComfyError, Error, Graph, Library, Options,
+                       Replay, Result, Tool, add_comfy_args, add_loras, check_packages, die, exact, link, parse_lora,
+                       prepare, replay_main, rope_ref, run_requests, upload_name)
 
 __all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
 
@@ -287,9 +283,6 @@ def context(comfy: Comfy, requests: list[Request]) -> str | None:
     return enhancer_system_prompt(comfy) if any(r.enhance for r in requests) else None
 
 
-TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: build(r, inputs.uploaded, seed, context),
-            flags=image_flags, describe=describe, context=context)
-
 
 def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
         no_start: bool = False, comfy_args: str | Iterable[str] = (), timeout: int = TIMEOUT, fresh: bool = False,
@@ -379,7 +372,7 @@ def workflow(request: Request, seed: int = 0, *, fresh: bool = False, library: s
 
 def main(argv: list[str]) -> int:
     if any(arg == "--replay" or arg.startswith("--replay=") for arg in argv):
-        return replay_main(argv)
+        return replay_main(TOOL, argv)
     a = parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
     if a.dry_run:
@@ -392,102 +385,37 @@ def main(argv: list[str]) -> int:
 
 # ---------------------------------------------------------------- replay
 
+# What the status line says while a node of a recorded workflow runs, by node class.
 REPLAY_LABELS = {"UNETLoader": "loading the diffusion model", "CLIPLoader": "loading the text encoder",
                  "TextGenerate": "enhancing the prompt", "TextEncodeQwenImageEditPlus": "encoding the prompt and images",
                  "TextEncodeQwenImage21": "encoding the prompt and images", "KSampler": "sampling",
                  "VAEDecode": "decoding"}
 
 
-def parse_replay_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog=Path(__file__).name,
-        description="Makes an image in the rope library again. It uploads the bytes its inputs had, sends the "
-                    "workflow recorded with it, and compares the pixels of the new image with the old: an identical "
-                    "result is only recorded, a different one is kept as a new image next to the old. Before sending, "
-                    "it says what differs from when the image was made: the workflow today's img2img.py would build, "
-                    "model files, ComfyUI and its packages.")
-    p.add_argument("--replay", required=True, metavar="ID", help="the image: at least 6 hex digits of its id")
-    p.add_argument("-s", "--seed", type=int, help="change only the sampling seed")
-    p.add_argument("--rebuild", action="store_true",
-                   help="send the workflow today's img2img.py builds from the recorded flags, not the recorded one")
+def reseed(nodes: dict, seed: int) -> None:
+    """Puts `seed` into a recorded workflow: the sampler's, and the prompt enhancer's."""
+    for node in nodes.values():
+        if node["class_type"] == "KSampler":
+            node["inputs"]["seed"] = seed
+        if node["class_type"] == "TextGenerate" and "sampling_mode.seed" in node["inputs"]:
+            node["inputs"]["sampling_mode.seed"] = seed
+
+
+def replay_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rerun-enhancer", action="store_true",
                    help="2.1 with --enhance: let the prompt enhancer write the prompt again, instead of reusing what "
                         "it wrote then (it samples, so the result will differ)")
-    p.add_argument("--library", metavar="DIR", help="the rope library (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
-    p.add_argument("--dry-run", action="store_true", help="print the differences and the workflow, and stop")
-    g = p.add_argument_group("ComfyUI")
-    add_comfy_args(g)
-    a = p.parse_args(argv)
-    a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
-    return a
 
 
-def replay_main(argv: list[str]) -> int:
-    a = parse_replay_args(argv)
-    check_packages({"websocket": "websocket-client"}, TOOL.file)
-    sys.stdout.reconfigure(line_buffering=True)
-    a.lib = Library.find(a.library)
-    info = a.lib.call("show", a.replay)
-    made = info["meta"].get("made")
-    if not made:
-        die(f"{info['short']} has no recipe: rope did not see it being made, so it cannot be replayed")
-    missing = [str(i["slot"]) for i in info["inputs"] if i.get("missing")]
-    if missing:
-        die(f"{info['short']} cannot be replayed: rope lacks the bytes of input image {', '.join(missing)}")
-    a.info, a.made, a.prompt, a.flags = info, made, made.get("prompt", ""), made.get("flags", [])
-    a.inputs = [{"id": i["id"], "uploaded": i.get("uploaded"), "path": Path(i["path"]), "recorded": i.get("upload")}
-                for i in info["inputs"]]
-    a.lib.using([info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
-    a.today = parse_args([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt]).request
-    a.seed_used = a.seed if a.seed is not None else a.today.seed
-    a.recorded = info.get("graph")
-    if a.recorded is None:
-        print(f"{info['short']} has no recorded workflow, so the one today's img2img.py builds is sent")
-    else:
-        names = [i["recorded"] or "" for i in a.inputs]
-        rebuilt = build(a.today, names, a.today.seed, enhancer_prompt(a.recorded)).nodes
-        diff = graph_diff(a.recorded, rebuilt)
-        if diff:
-            sent = "today's (--rebuild)" if a.rebuild else "the recorded one; --rebuild sends today's"
-            print(f"today's img2img.py builds a different workflow from these flags; sending {sent}:")
-            for line in diff[:20]:
-                print(f"  {line}")
-            if len(diff) > 20:
-                print(f"  ... and {len(diff) - 20} more")
-    hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
-    for line in model_changes(made.get("models") or [], model_files(a.recorded or {}, hashes)):
-        print(f"  model: {line}")
-    if a.dry_run:
-        nodes = replay_graph(a, [i["recorded"] or "" for i in a.inputs], "<system prompt from ComfyUI>")
-        print(json.dumps(nodes, indent=2, ensure_ascii=False))
-        return 0
-    with_comfy(a.options, lambda comfy: replay_jobs(a, comfy))
-    return 0
-
-
-def replay_graph(a: argparse.Namespace, names: list[str], system_prompt: str | None) -> dict:
-    """The workflow to send: the recorded one with the inputs renamed to `names`, or today's build of the recorded
-    flags; with the seed changed by -s, and the enhanced prompt reused unless --rerun-enhancer."""
-    if a.rebuild or a.recorded is None:
-        nodes = build(a.today, names, a.seed_used, system_prompt).nodes
-    else:
-        nodes = copy.deepcopy(a.recorded)
-        renamed = {i["recorded"]: n for i, n in zip(a.inputs, names) if i["recorded"]}
-        for node in nodes.values():
-            if node["class_type"] == "LoadImage" and node["inputs"].get("image") in renamed:
-                node["inputs"]["image"] = renamed[node["inputs"]["image"]]
-        for node in nodes.values():
-            if node["class_type"] == "KSampler":
-                node["inputs"]["seed"] = a.seed_used
-            if node["class_type"] == "TextGenerate" and "sampling_mode.seed" in node["inputs"]:
-                node["inputs"]["sampling_mode.seed"] = a.seed_used
-    enhanced = a.made.get("enhanced_prompt")
+def reuse_enhanced(nodes: dict, made: dict, a: argparse.Namespace) -> None:
+    """Feeds the workflow the prompt the enhancer wrote then, unless --rerun-enhancer."""
+    enhanced = made.get("enhanced_prompt")
     if enhanced and not a.rerun_enhancer:
         pin_enhanced(nodes, enhanced)
-    return nodes
 
 
 def enhancer_prompt(nodes: dict) -> str | None:
+    """The enhancer's system prompt in a recorded workflow: build()'s context, without asking ComfyUI for it."""
     return next((n["inputs"].get("system_prompt") for n in nodes.values() if n["class_type"] == "TextGenerate"), None)
 
 
@@ -510,115 +438,10 @@ def pin_enhanced(nodes: dict, text: str) -> None:
                 nodes.pop(ref[0], None)
 
 
-def graph_diff(old: dict, new: dict) -> list[str]:
-    """How two API workflows differ, node by node."""
-    def show(v) -> str:
-        s = json.dumps(v, ensure_ascii=False)
-        return s if len(s) <= 60 else s[:57] + "..."
-
-    out = []
-    for nid in sorted(set(old) | set(new), key=lambda k: (len(k), k)):
-        o, n = old.get(nid), new.get(nid)
-        if o is None:
-            out.append(f"+ node {nid} {n['class_type']}")
-        elif n is None:
-            out.append(f"- node {nid} {o['class_type']}")
-        elif o["class_type"] != n["class_type"]:
-            out.append(f"node {nid}: {o['class_type']} -> {n['class_type']}")
-        else:
-            for k in sorted(set(o["inputs"]) | set(n["inputs"])):
-                if o["inputs"].get(k) != n["inputs"].get(k):
-                    out.append(f"{o['class_type']}.{k}: {show(o['inputs'].get(k))} -> {show(n['inputs'].get(k))}")
-    return out
-
-
-def model_changes(then: list[dict], now: list[dict]) -> list[str]:
-    """How the model files differ from when an image was made: by content where both sides have a hash, else (an
-    older record) by size and modification time."""
-    out = []
-    for old in then:
-        new = next((m for m in now if m["dir"] == old["dir"] and m["name"] == old["name"]), None)
-        if new is None:
-            continue
-        if "size" in old and "size" not in new:
-            out.append(f"{old['name']} is missing now")
-        elif "sha256" in old and "sha256" in new:
-            if old["sha256"] != new["sha256"]:
-                out.append(f"{old['name']} has other content than then (sha256 {old['sha256'][:12]} -> {new['sha256'][:12]})")
-        elif (old.get("size"), old.get("mtime_ns")) != (new.get("size"), new.get("mtime_ns")):
-            out.append(f"{old['name']} may not be the same file as then (size or modification time differs)")
-    return out
-
-
-def env_changes(then: dict, now: dict, prefix: str = "") -> list[str]:
-    out = []
-    for k in sorted(set(then) | set(now)):
-        o, n = then.get(k), now.get(k)
-        if isinstance(o, dict) and isinstance(n, dict):
-            out += env_changes(o, n, f"{prefix}{k}.")
-        elif o != n and o is not None:
-            out.append(f"{prefix}{k}: {o} -> {n}")
-    return out
-
-
-def replay_jobs(a: argparse.Namespace, comfy: Comfy) -> list[str]:
-    import websocket
-
-    run = Run(TOOL, comfy, a.lib, a.options, Status(), partial(keep_replay, a),
-              ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
-    status = run.status
-    tag = fresh_tag("r")
-    names = []
-    for i in a.inputs:
-        stem = re.sub(r"^[0-9a-f]{12}_([rf][0-9a-f]{6}_)?", "", Path(i["recorded"] or i["path"].name).stem)
-        names.append(comfy.upload(i["path"], upload_name(i["path"], stem, tag)))
-    run.server_info, run.env, run.code = comfy.system_info(), comfy_env(comfy), code_identity(TOOL.file)
-    env_id = a.made.get("env")
-    if isinstance(env_id, str) and (a.lib.root / "envs" / f"{env_id}.json").exists():
-        then = json.loads((a.lib.root / "envs" / f"{env_id}.json").read_text("utf-8"))
-        for line in env_changes(then, run.env):
-            print(f"  environment: {line}")
-    system_prompt = enhancer_system_prompt(comfy) if a.today.enhance and (a.rebuild or a.recorded is None) else None
-    nodes = replay_graph(a, names, system_prompt)
-    run.prehash = start_prehash(run.hashes, [nodes])
-    graph = Graph()
-    graph.nodes = nodes
-    graph.labels = {nid: REPLAY_LABELS[n["class_type"]] for nid, n in nodes.items() if n["class_type"] in REPLAY_LABELS}
-    graph.image_out = next(nid for nid, n in nodes.items() if n["class_type"] == "PreviewImage")
-    graph.text_out = next((nid for nid, n in nodes.items() if n["class_type"] == "PreviewAny"), "")
-    inputs = Inputs([a.info["name"]], a.inputs, [i["path"] for i in a.inputs], [], names)
-    job = Job(a.today, inputs, 1, a.seed_used, graph, f"[1/1] seed {a.seed_used}")
-    ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
-    try:
-        pending = {comfy.queue(graph): job}
-        print(f"replaying {a.info['short']} {a.info['name']}, seed {a.seed_used}")
-        try:
-            wait(run, ws, pending, 1)
-        except KeyboardInterrupt:
-            status.line("\ncancelling the replay")
-            comfy.cancel(list(pending))
-            raise
-    finally:
-        ws.close()
-    return job.saved
-
-
-def keep_replay(a: argparse.Namespace, run: Run, job: Job, data: bytes, enhanced: str, suffix: str) -> str:
-    """Records a replay's result with the image it replays, and returns what came of it."""
-    flags = image_flags(a.today, a.seed_used) if a.rebuild or a.recorded is None else \
-        [f"--seed={a.seed_used}" if f.startswith("--seed=") else f for f in a.flags]
-    made = json.dumps(recipe(run, job, flags, enhanced or a.made.get("enhanced_prompt") or ""), ensure_ascii=False)
-
-    def args(png: Path, made: Path, graph: Path) -> list[str]:
-        return ["replayed", a.info["id"], str(png), f"--made={made}", f"--graph={graph}", f"--repo={HERE}"]
-
-    r, _ = send_result(run, f"replay-{a.info['short']}", data, made, job, args, suffix)
-    if r is None:
-        return "not recorded in rope; see above"
-    if r["result"] == "identical":
-        return f"identical to {a.info['short']}, pixel for pixel"
-    return (f"differs from {a.info['short']}: largest difference {r['max_diff']} of 255, in "
-            f"{r['differing'] * 100:.2f}% of the pixels; kept as {r['id'][:12]}")
+REPLAY = Replay(parse=lambda argv: parse_args(argv).request, reseed=reseed, labels=REPLAY_LABELS, args=replay_args,
+                context_of=enhancer_prompt, context_dry="<system prompt from ComfyUI>", adjust=reuse_enhanced)
+TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: build(r, inputs.uploaded, seed, context),
+            flags=image_flags, describe=describe, context=context, replay=REPLAY)
 
 
 if __name__ == "__main__":

@@ -43,9 +43,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Library, Options, Result, Tool,
-                       add_comfy_args, add_loras, check_packages, exact, link, parse_lora, prepare, rope_ref,
-                       run_requests, upload_name)
+from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Library, Options, Replay, Result,
+                       Tool, add_comfy_args, add_loras, check_packages, exact, link, parse_lora, prepare, replay_main,
+                       rope_ref, run_requests, upload_name)
 
 __all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
 
@@ -216,8 +216,22 @@ def describe(r: Request, base: int) -> str:
     return ", ".join(bits)
 
 
+# What the status line says while a node of a recorded workflow runs, by node class (--replay).
+REPLAY_LABELS = {"UNETLoader": "loading a diffusion model", "CLIPLoader": "loading the text encoder",
+                 "LoraLoaderModelOnly": "loading a LoRA", "WanImageToVideo": "encoding the start image",
+                 "KSamplerAdvanced": "sampling", "VAEDecode": "decoding", "CreateVideo": "encoding the video"}
+
+
+def reseed(nodes: dict, seed: int) -> None:
+    """Puts `seed` into a recorded workflow: the sampler that adds the noise, the high-noise model's."""
+    for node in nodes.values():
+        if node["class_type"] == "KSamplerAdvanced" and node["inputs"].get("add_noise") == "enable":
+            node["inputs"]["noise_seed"] = seed
+
+
+REPLAY = Replay(parse=lambda argv: parse_args(argv).request, reseed=reseed, result_node="SaveVideo", labels=REPLAY_LABELS)
 TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: build(r, inputs, seed),
-            flags=video_flags, describe=describe, unit="clip")
+            flags=video_flags, describe=describe, unit="clip", replay=REPLAY)
 
 
 def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
@@ -262,6 +276,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     g.add_argument("--tag", dest="tags", action="append", default=[], metavar="TAG", help="tag the clips; repeatable")
     g.add_argument("--note", help="a note on each clip")
     g.add_argument("--library", metavar="DIR", help="the rope library (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
+    g.add_argument("--replay", metavar="ID", help="make a rope clip again from its record; see --replay ID --help")
     g = p.add_argument_group("ComfyUI")
     add_comfy_args(g)
     g.add_argument("--dry-run", action="store_true", help="print the API workflow JSON and stop; nothing is uploaded or run")
@@ -291,6 +306,8 @@ def workflow(request: Request, seed: int = 0, *, fresh: bool = False, library: s
 
 
 def main(argv: list[str]) -> int:
+    if any(arg == "--replay" or arg.startswith("--replay=") for arg in argv):
+        return replay_main(TOOL, argv)
     a = parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
     if a.dry_run:

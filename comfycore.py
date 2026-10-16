@@ -9,6 +9,8 @@ its Request (Settled says what the core needs of one), a build() that makes the 
 flags its recipe records; run_requests() does the rest. img2img.py shows all of it."""
 from __future__ import annotations
 
+import argparse
+import copy
 import hashlib
 import io
 import json
@@ -29,6 +31,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -130,10 +133,30 @@ class Tool:
     # fetched once per run, before building, and given to every build(): img2img.py's enhancer system prompt
     context: Callable[[Comfy, list[Settled]], Any] = lambda comfy, requests: None
     unit: str = "image"  # what one result is called in messages
+    replay: Replay | None = None  # how its results are made again (replay_main); None: the tool has no --replay
 
     @property
     def name(self) -> str:
         return self.file.name
+
+
+@dataclass(frozen=True)
+class Replay:
+    """What a tool adds to --replay (replay_main): how its recorded flags become today's request, where the seed
+    and the result sit in its workflows, and its own options. img2img.py's REPLAY is the example."""
+
+    parse: Callable[[list[str]], Settled]  # (the recorded flags, "--", the inputs' files, the prompt) -> today's request
+    reseed: Callable[[dict, int], None]  # puts a seed into a recorded workflow, wherever its samplers take one
+    result_node: str = "PreviewImage"  # the class of the node whose output is the result
+    labels: dict[str, str] = field(default_factory=dict)  # node class -> the status line while it runs
+    args: Callable[[argparse.ArgumentParser], None] = lambda p: None  # the tool's own --replay options
+    # build()'s context when the recorded flags are rebuilt for the comparison, without asking ComfyUI (img2img.py:
+    # the enhancer's system prompt, read from the recorded workflow), and what stands in for it in a --dry-run
+    context_of: Callable[[dict], Any] = lambda nodes: None
+    context_dry: Any = None
+    # a last word on the workflow about to be sent, recorded or rebuilt, given the recipe and the options
+    # (img2img.py pins the prompt the enhancer wrote)
+    adjust: Callable[[dict, dict, argparse.Namespace], None] = lambda nodes, made, a: None
 
 
 @dataclass
@@ -1150,3 +1173,212 @@ def check_packages(needed: dict[str, str], script: Path) -> None:
         die(f"this Python ({sys.executable}) lacks {', '.join(missing)}. Either run the script directly, "
             f"as ./{script.name}, and uv supplies the packages; or run ./setup_venv.sh once and use "
             f"{tilde(HERE / '.venv' / 'bin' / 'python')}, e.g. after: source {tilde(HERE / '.venv' / 'bin' / 'activate')}")
+
+
+# ---------------------------------------------------------------- replay
+
+def parse_replay_args(tool: Tool, argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog=tool.name,
+        description="Makes an image or clip in the rope library again. It uploads the bytes its inputs had, sends the "
+                    "workflow recorded with it, and compares the new result with the old (the pixels of an image, "
+                    "the bytes of a clip): an identical result is only recorded, a different one is kept next to the "
+                    "old. Before sending, it says what differs from when the item was made: the workflow today's "
+                    f"{tool.name} would build, model files, ComfyUI and its packages.")
+    p.add_argument("--replay", required=True, metavar="ID", help="the image or clip: at least 6 hex digits of its id")
+    p.add_argument("-s", "--seed", type=int, help="change only the sampling seed")
+    p.add_argument("--rebuild", action="store_true",
+                   help=f"send the workflow today's {tool.name} builds from the recorded flags, not the recorded one")
+    tool.replay.args(p)
+    p.add_argument("--library", metavar="DIR", help="the rope library (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
+    p.add_argument("--dry-run", action="store_true", help="print the differences and the workflow, and stop")
+    g = p.add_argument_group("ComfyUI")
+    add_comfy_args(g)
+    a = p.parse_args(argv)
+    a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
+    return a
+
+
+def replay_main(tool: Tool, argv: list[str]) -> int:
+    """A tool's --replay: makes an image or clip in rope again from its record, as parse_replay_args describes."""
+    if tool.replay is None:
+        die(f"{tool.name} has no --replay")
+    a = parse_replay_args(tool, argv)
+    check_packages({"websocket": "websocket-client"}, tool.file)
+    sys.stdout.reconfigure(line_buffering=True)
+    a.lib = Library.find(a.library)
+    info = a.lib.call("show", a.replay)
+    made = info["meta"].get("made")
+    if not made:
+        die(f"{info['short']} has no recipe: rope did not see it being made, so it cannot be replayed")
+    by = made.get("by", "img2img.py")
+    if by != tool.name:
+        die(f"{info['short']} was made by {by}, which is what replays it: {by} --replay {info['short']}")
+    missing = [str(i["slot"]) for i in info["inputs"] if i.get("missing")]
+    if missing:
+        die(f"{info['short']} cannot be replayed: rope lacks the bytes of input image {', '.join(missing)}")
+    a.info, a.made, a.prompt, a.flags = info, made, made.get("prompt", ""), made.get("flags", [])
+    a.inputs = [{"id": i["id"], "uploaded": i.get("uploaded"), "path": Path(i["path"]), "recorded": i.get("upload")}
+                for i in info["inputs"]]
+    a.lib.using([info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
+    a.today = tool.replay.parse([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt])
+    a.seed_used = a.seed if a.seed is not None else a.today.seed
+    a.recorded = info.get("graph")
+    if a.recorded is None:
+        print(f"{info['short']} has no recorded workflow, so the one today's {tool.name} builds is sent")
+    else:
+        names = [i["recorded"] or "" for i in a.inputs]
+        context = tool.replay.context_of(a.recorded)
+        rebuilt = tool.build(a.today, replay_inputs(a, names), a.today.seed, context).nodes
+        diff = graph_diff(a.recorded, rebuilt)
+        if diff:
+            sent = "today's (--rebuild)" if a.rebuild else "the recorded one; --rebuild sends today's"
+            print(f"today's {tool.name} builds a different workflow from these flags; sending {sent}:")
+            for line in diff[:20]:
+                print(f"  {line}")
+            if len(diff) > 20:
+                print(f"  ... and {len(diff) - 20} more")
+    hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
+    for line in model_changes(made.get("models") or [], model_files(a.recorded or {}, hashes)):
+        print(f"  model: {line}")
+    if a.dry_run:
+        nodes = replay_graph(tool, a, [i["recorded"] or "" for i in a.inputs], tool.replay.context_dry)
+        print(json.dumps(nodes, indent=2, ensure_ascii=False))
+        return 0
+    with_comfy(a.options, lambda comfy: replay_jobs(tool, a, comfy), tool.unit)
+    return 0
+
+
+def replay_inputs(a: argparse.Namespace, names: list[str]) -> Inputs:
+    """The replayed item's inputs as a build() takes them: rope's files, under the server-side names `names`."""
+    return Inputs([a.info["name"]], a.inputs, [i["path"] for i in a.inputs], [], names)
+
+
+def replay_graph(tool: Tool, a: argparse.Namespace, names: list[str], context: Any) -> dict:
+    """The workflow to send: the recorded one with the inputs renamed to `names`, or today's build of the recorded
+    flags; with the seed changed by -s, and the tool's last word (img2img.py reuses the enhanced prompt)."""
+    if a.rebuild or a.recorded is None:
+        nodes = tool.build(a.today, replay_inputs(a, names), a.seed_used, context).nodes
+    else:
+        nodes = copy.deepcopy(a.recorded)
+        renamed = {i["recorded"]: n for i, n in zip(a.inputs, names) if i["recorded"]}
+        for node in nodes.values():
+            if node["class_type"] == "LoadImage" and node["inputs"].get("image") in renamed:
+                node["inputs"]["image"] = renamed[node["inputs"]["image"]]
+        tool.replay.reseed(nodes, a.seed_used)
+    tool.replay.adjust(nodes, a.made, a)
+    return nodes
+
+
+def graph_diff(old: dict, new: dict) -> list[str]:
+    """How two API workflows differ, node by node."""
+    def show(v) -> str:
+        s = json.dumps(v, ensure_ascii=False)
+        return s if len(s) <= 60 else s[:57] + "..."
+
+    out = []
+    for nid in sorted(set(old) | set(new), key=lambda k: (len(k), k)):
+        o, n = old.get(nid), new.get(nid)
+        if o is None:
+            out.append(f"+ node {nid} {n['class_type']}")
+        elif n is None:
+            out.append(f"- node {nid} {o['class_type']}")
+        elif o["class_type"] != n["class_type"]:
+            out.append(f"node {nid}: {o['class_type']} -> {n['class_type']}")
+        else:
+            for k in sorted(set(o["inputs"]) | set(n["inputs"])):
+                if o["inputs"].get(k) != n["inputs"].get(k):
+                    out.append(f"{o['class_type']}.{k}: {show(o['inputs'].get(k))} -> {show(n['inputs'].get(k))}")
+    return out
+
+
+def model_changes(then: list[dict], now: list[dict]) -> list[str]:
+    """How the model files differ from when an item was made: by content where both sides have a hash, else (an
+    older record) by size and modification time."""
+    out = []
+    for old in then:
+        new = next((m for m in now if m["dir"] == old["dir"] and m["name"] == old["name"]), None)
+        if new is None:
+            continue
+        if "size" in old and "size" not in new:
+            out.append(f"{old['name']} is missing now")
+        elif "sha256" in old and "sha256" in new:
+            if old["sha256"] != new["sha256"]:
+                out.append(f"{old['name']} has other content than then (sha256 {old['sha256'][:12]} -> {new['sha256'][:12]})")
+        elif (old.get("size"), old.get("mtime_ns")) != (new.get("size"), new.get("mtime_ns")):
+            out.append(f"{old['name']} may not be the same file as then (size or modification time differs)")
+    return out
+
+
+def env_changes(then: dict, now: dict, prefix: str = "") -> list[str]:
+    out = []
+    for k in sorted(set(then) | set(now)):
+        o, n = then.get(k), now.get(k)
+        if isinstance(o, dict) and isinstance(n, dict):
+            out += env_changes(o, n, f"{prefix}{k}.")
+        elif o != n and o is not None:
+            out.append(f"{prefix}{k}: {o} -> {n}")
+    return out
+
+
+def replay_jobs(tool: Tool, a: argparse.Namespace, comfy: Comfy) -> list[str]:
+    import websocket
+
+    run = Run(tool, comfy, a.lib, a.options, Status(), partial(keep_replay, tool, a),
+              ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
+    status = run.status
+    tag = fresh_tag("r")
+    names = []
+    for i in a.inputs:
+        stem = re.sub(r"^[0-9a-f]{12}_([rf][0-9a-f]{6}_)?", "", Path(i["recorded"] or i["path"].name).stem)
+        names.append(comfy.upload(i["path"], upload_name(i["path"], stem, tag)))
+    run.server_info, run.env, run.code = comfy.system_info(), comfy_env(comfy), code_identity(tool.file)
+    env_id = a.made.get("env")
+    if isinstance(env_id, str) and (a.lib.root / "envs" / f"{env_id}.json").exists():
+        then = json.loads((a.lib.root / "envs" / f"{env_id}.json").read_text("utf-8"))
+        for line in env_changes(then, run.env):
+            print(f"  environment: {line}")
+    context = tool.context(comfy, [a.today]) if a.rebuild or a.recorded is None else None
+    nodes = replay_graph(tool, a, names, context)
+    run.prehash = start_prehash(run.hashes, [nodes])
+    graph = Graph()
+    graph.nodes = nodes
+    labels = tool.replay.labels
+    graph.labels = {nid: labels[n["class_type"]] for nid, n in nodes.items() if n["class_type"] in labels}
+    graph.image_out = next(nid for nid, n in nodes.items() if n["class_type"] == tool.replay.result_node)
+    graph.text_out = next((nid for nid, n in nodes.items() if n["class_type"] == "PreviewAny"), "")
+    job = Job(a.today, replay_inputs(a, names), 1, a.seed_used, graph, f"[1/1] seed {a.seed_used}")
+    ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
+    try:
+        pending = {comfy.queue(graph): job}
+        print(f"replaying {a.info['short']} {a.info['name']}, seed {a.seed_used}")
+        try:
+            wait(run, ws, pending, 1)
+        except KeyboardInterrupt:
+            status.line("\ncancelling the replay")
+            comfy.cancel(list(pending))
+            raise
+    finally:
+        ws.close()
+    return job.saved
+
+
+def keep_replay(tool: Tool, a: argparse.Namespace, run: Run, job: Job, data: bytes, enhanced: str, suffix: str) -> str:
+    """Records a replay's result with the item it replays (rope replayed), and returns what came of it."""
+    flags = tool.flags(a.today, a.seed_used) if a.rebuild or a.recorded is None else \
+        [f"--seed={a.seed_used}" if f.startswith("--seed=") else f for f in a.flags]
+    made = json.dumps(recipe(run, job, flags, enhanced or a.made.get("enhanced_prompt") or ""), ensure_ascii=False)
+
+    def args(file: Path, made: Path, graph: Path) -> list[str]:
+        return ["replayed", a.info["id"], str(file), f"--made={made}", f"--graph={graph}", f"--repo={HERE}"]
+
+    r, _ = send_result(run, f"replay-{a.info['short']}", data, made, job, args, suffix)
+    if r is None:
+        return "not recorded in rope; see above"
+    bytes_compared = r.get("compared") == "bytes"
+    if r["result"] == "identical":
+        return f"identical to {a.info['short']}, {'byte for byte' if bytes_compared else 'pixel for pixel'}"
+    if bytes_compared:
+        return f"differs from {a.info['short']} (other bytes); kept as {r['id'][:12]}"
+    return (f"differs from {a.info['short']}: largest difference {r['max_diff']} of 255, in "
+            f"{r['differing'] * 100:.2f}% of the pixels; kept as {r['id'][:12]}")
