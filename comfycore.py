@@ -124,7 +124,7 @@ class Tool:
 
     file: Path  # the script, e.g. img2img.py: the recipe's "by" is its name, its code identity its content
     packages: dict[str, str]  # module -> package, as the script's header lists them, for check_packages()
-    build: Callable[[Settled, list[str], int, Any], Graph]  # (request, upload names, seed, context) -> its workflow
+    build: Callable[[Settled, Inputs, int, Any], Graph]  # (request, its inputs, seed, context) -> its workflow
     flags: Callable[[Settled, int], list[str]]  # (request, seed) -> the recipe's flags: the settings behind the result
     describe: Callable[[Settled, int], str]  # (request, first seed) -> its settings in a line, for the "queued" message
     # fetched once per run, before building, and given to every build(): img2img.py's enhancer system prompt
@@ -782,7 +782,7 @@ class Inputs:
 
     names: list[str]  # each input's name: the file's stem, or its rope name; the first one names the result
     records: list[dict]  # per input, rope's "id" and "path" (and "uploaded", the id of its PNG conversion)
-    uploads: list[Path]  # the file to upload for each input: the input itself, or its PNG conversion
+    uploads: list[Path]  # the file to upload for each input: the input itself, or its PNG conversion (upright)
     stems: list[str]  # the name part of each upload's server-side name
     uploaded: list[str] = field(default_factory=list)  # the server-side names, once uploaded
 
@@ -1033,7 +1033,7 @@ def run_jobs(run: Run, requests: list[Settled], all_inputs: list[Inputs]) -> lis
         bases.append(base)
         which = f"#{n} " if len(requests) > 1 else ""
         for i in range(r.count):
-            graph = run.tool.build(r, inputs.uploaded, base + i, context)
+            graph = run.tool.build(r, inputs, base + i, context)
             jobs.append(Job(r, inputs, i + 1, base + i, graph, f"[{len(jobs) + 1}/{total}] {which}seed {base + i}"))
     run.prehash = start_prehash(run.hashes, [job.graph.nodes for job in jobs])
     ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
@@ -1095,11 +1095,12 @@ def settle(requests: Iterable[Settled]) -> list[Settled]:
     return settled
 
 
-def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options) -> list[Result]:
+def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options,
+                 keep: Callable[[Run, Job, bytes, str, str], str] = keep_result) -> list[Result]:
     """Makes every request of a tool, all through one ComfyUI, and keeps the results in rope: a Result per result,
     the requests in order and each request's results in seed order. Every request is settled first, so a bad one
     (a ValueError) stops the batch before anything runs. A tool's run() wraps this; img2img.run() says what it
-    promises."""
+    promises. `keep` is what keeps each result: keep_result, into rope, unless the tool has another way."""
     settled = settle(requests)
     if not settled:
         return []
@@ -1112,7 +1113,7 @@ def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options) -> list
     hashes = ModelHashes(lib.root / ".cache" / "model-sha256.json")
     with tempfile.TemporaryDirectory(prefix=f"{tool.file.stem}-") as workdir:
         all_inputs = prepare(settled, Path(workdir), lib, via=tool.name)
-        return with_comfy(opts, lambda comfy: run_jobs(Run(tool, comfy, lib, opts, Status(), keep_result, hashes),
+        return with_comfy(opts, lambda comfy: run_jobs(Run(tool, comfy, lib, opts, Status(), keep, hashes),
                                                        settled, all_inputs), tool.unit)
 
 

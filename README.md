@@ -1,6 +1,6 @@
-# img2img: local image-to-image with Qwen-Image
+# img2img: local image editing and image-to-video with ComfyUI
 
-Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 through ComfyUI on this machine (RTX 4090, 24 GB).
+Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 for images and Wan 2.2 for short clips, through ComfyUI on this machine (RTX 4090, 24 GB), from the command line or from Python. Every image goes into rope, its own library, with the recipe that made it.
 
 | Tool | What it does |
 |---|---|
@@ -8,8 +8,10 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 through ComfyUI on this machine (RT
 | `install_comfyui.py` | Installs or updates ComfyUI with its own venv |
 | `download_models.py` | Downloads the model files from Hugging Face: the image models, optional skin LoRAs, and Wan 2.2 for video |
 | `run_comfyui.sh` | Starts ComfyUI |
-| `img2img.py` | Makes a new image from input images and a prompt, through ComfyUI's API. Also a Python module, for running many combinations in one go |
-| `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
+| `img2img.py` | Makes a new image from input images and a prompt with Qwen-Image, through ComfyUI's API. Also a Python module, for running many combinations in one go |
+| `img2vid.py` | Makes a short clip from a start image and a prompt with Wan 2.2, the same way. The clips land in `videos/` until rope keeps videos |
+| `comfycore.py` | What both scripts are built on: the ComfyUI client, rope, the input conversion and the running of jobs. Not a command |
+| `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py`, and the start image of every clip, with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
 
 Run every command from the repo root. Each script finds `ComfyUI/`, `models/` and `.venv/` next to itself, so the repo can live anywhere and be moved without reinstalling.
 
@@ -17,10 +19,11 @@ Run every command from the repo root. Each script finds `ComfyUI/`, `models/` an
 
 ```bash
 ./install_comfyui.py                                    # ComfyUI, with its own venv
-uv run download_models.py all                           # the model files
+uv run download_models.py all wan                       # the model files: the image models, and Wan 2.2 for clips
 cargo build --release --manifest-path rope/Cargo.toml   # the rope image library
 ./run_comfyui.sh                                        # in another pane: keeps the models loaded between runs
 ./img2img.py photo.jpg "把背景換成黃昏的海邊"             # "turn the background into a beach at dusk"
+./img2vid.py photo.jpg "the leaves move in the wind"    # a 5-second clip, in videos/
 rope/target/release/rope-gui                            # browse the results
 ```
 
@@ -28,15 +31,17 @@ rope/target/release/rope-gui                            # browse the results
 
 ```
 .
-├── setup_venv.sh        # builds .venv with the packages img2img.py and download_models.py need
+├── setup_venv.sh        # builds .venv with the packages img2img.py, img2vid.py and download_models.py need
 ├── .venv/               # Python 3.12 venv for the scripts, separate from ComfyUI's
 ├── install_comfyui.py   # installs or updates ComfyUI (Python standard library only)
 ├── download_models.py   # downloads models from Hugging Face (run with uv, nothing to install first)
 ├── run_comfyui.sh       # starts ComfyUI (written by install_comfyui.py)
 ├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
-├── comfycore.py         # what img2img.py is built on: the ComfyUI client, rope, the inputs, running jobs; knows no model
+├── img2vid.py           # start image + prompt -> short clip with Wan 2.2, the same way; the clips land in videos/
+├── comfycore.py         # what both are built on: the ComfyUI client, rope, the inputs, running jobs; knows no model
 ├── run.py               # template for a batch of settings to compare, on img2img.py's Python API
 ├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
+├── videos/              # img2vid.py's clips, each with its recipe, until rope keeps videos (not in git)
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
 │   ├── diffusion_models/
 │   ├── text_encoders/
@@ -51,7 +56,7 @@ rope/target/release/rope-gui                            # browse the results
 
 ## Python environment: setup_venv.sh
 
-The packages `img2img.py` and `download_models.py` need are listed in the `# /// script` block at the top of each file. There are two ways to run them; either works:
+The packages `img2img.py`, `img2vid.py` and `download_models.py` need are listed in the `# /// script` block at the top of each file. There are two ways to run them; either works:
 
 | Way | Command | Preparation |
 |---|---|---|
@@ -64,7 +69,7 @@ source .venv/bin/activate
 python img2img.py photo.jpg "把天空換成星空"
 ```
 
-`setup_venv.sh` uses uv to make a Python 3.12 `.venv`, installs the package lists from the two scripts, and checks each package imports. When a script gains a package, run it again; to rebuild from scratch, delete `.venv` first. A script of your own that does `import img2img` (see [From Python](#from-python)) needs the same packages, so run it with `.venv/bin/python` too.
+`setup_venv.sh` uses uv to make a Python 3.12 `.venv`, installs the package lists from the three scripts, and checks each package imports. When a script gains a package, run it again; to rebuild from scratch, delete `.venv` first. A script of your own that does `import img2img` (see [From Python](#from-python)) needs the same packages, so run it with `.venv/bin/python` too.
 
 `python img2img.py` without activating `.venv` runs the system Python or ComfyUI's venv. Neither has these packages, so the script lists what is missing and how to run it instead. ComfyUI's own venv is `ComfyUI/.venv`, managed by `install_comfyui.py` and separate from `.venv`.
 
@@ -135,7 +140,7 @@ uv run download_models.py 2511 --skin-loras edit-skin skin-fix   # the skin LoRA
 uv run download_models.py wan                       # Wan 2.2 image-to-video: the 14B pair in fp8, with the 4-step LoRAs
 ```
 
-MODEL is `2.1`, `2511`, `wan` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`, `wan2.2`). `all` is the two image models, the ones `img2img.py` runs; `wan` is asked for by name.
+MODEL is `2.1`, `2511`, `wan` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`, `wan2.2`). `all` is the two image models, the ones `img2img.py` runs; `wan`, for `img2vid.py`, is asked for by name, alone or with the others.
 
 ### The default set
 
@@ -160,7 +165,7 @@ Not in the default set; `--skin-loras NAME…` adds them for 2511. How to use th
 
 ### Wan 2.2
 
-Alibaba's open video models (Apache 2.0), as repacked by Comfy-Org for ComfyUI's own Wan 2.2 templates ([ComfyUI's Wan 2.2 guide](https://docs.comfy.org/tutorials/video/wan/wan2_2)). `img2img.py` does not run them yet; the files land in the same `models/` layout, so ComfyUI finds them. `--wan-task` picks the models, several at once if wanted:
+Alibaba's open video models (Apache 2.0), as repacked by Comfy-Org for ComfyUI's own Wan 2.2 templates ([ComfyUI's Wan 2.2 guide](https://docs.comfy.org/tutorials/video/wan/wan2_2)). `img2vid.py` runs the `i2v` pair; `t2v` and `ti2v` are for ComfyUI's own templates for now. The files land in the same `models/` layout, so ComfyUI finds them. `--wan-task` picks the models, several at once if wanted:
 
 | TASK | Files | Size |
 |---|---|---|
@@ -226,7 +231,7 @@ The file lists are `plan_qwen_image_21()`, `plan_edit_2511()` and `plan_wan_22()
 
 ### Templates
 
-In the UI, open Workflow → Browse Templates on the left and search for `Qwen`:
+In the UI, open Workflow → Browse Templates on the left and search for `Qwen` or `Wan`:
 
 | Template | Files it needs |
 |---|---|
@@ -234,6 +239,9 @@ In the UI, open Workflow → Browse Templates on the left and search for `Qwen`:
 | Qwen Image Edit 2511 Int8: Image Edit | First `download_models.py 2511 --edit-precision int8` |
 | Qwen Image 2.1: Image Edit | The three 2.1 files **plus** the `--prompt-enhancer i2i` file |
 | Qwen Image 2.1: Text to Image | The three 2.1 files plus `--prompt-enhancer t2i` |
+| Wan 2.2 14B Image to Video | The `download_models.py wan` files; runs as it is. `img2vid.py` runs this template without the UI |
+| Wan 2.2 14B Text to Video | `download_models.py wan --wan-task t2v` |
+| Wan 2.2 5B Video Generation | `download_models.py wan --wan-task ti2v` |
 
 The 2.1 templates load the prompt enhancer in a CLIPLoader inside a subgraph. ComfyUI checks the file names of every connected node before running, so even with `refine_prompt` off, a missing enhancer file fails with `Value not in list`.
 
@@ -256,7 +264,7 @@ Give it images and a prompt and it makes a new image, with no UI. It flattens Co
 
 With `.venv` activated, `python img2img.py` works the same as `./img2img.py`. To try many settings in one go, [import it from Python](#from-python).
 
-`img2img.py` holds only what is about its models: the requests, the workflows and the replay. The ComfyUI client, rope, the input conversion and the running of jobs are `comfycore.py` beside it, which knows no model, so another tool can be built on it the same way. `img2img.py` needs it next to itself.
+`img2img.py` holds only what is about its models: the requests, the workflows and the replay. The ComfyUI client, rope, the input conversion and the running of jobs are `comfycore.py` beside it, which knows no model; `img2vid.py` is built on it the same way. Both need it next to themselves.
 
 Images come first and the prompt last; the first image sets the output size. With several images, refer to them in the prompt as 圖1, 圖2 or image 1, image 2, in command-line order. Prompts can be Chinese or English and work best as instructions that describe only the change: "replace … with …", "remove …", "add …".
 
@@ -430,14 +438,50 @@ for r in img2img.run(requests):
 - `ComfyUI/script_examples/`: official API examples; `websockets_api_example.py` works the way `img2img.py` does.
 - [Qwen-Image-Edit-2511 model card](https://huggingface.co/Qwen/Qwen-Image-Edit-2511): what the model can do and how to write prompts.
 
+## Making a clip from an image: img2vid.py
+
+Give it a start image and a prompt and it makes a short clip with Wan 2.2, the 14B image-to-video pair, through ComfyUI's API, the way `img2img.py` makes images: the same ComfyUI handling, the same input conversion, the same recipe. It is built on `comfycore.py` and flattens ComfyUI's Wan 2.2 14B Image to Video template. Download the models first with `uv run download_models.py wan` (the 14B pair in fp8 with the 4-step LoRAs, 38 GB).
+
+```bash
+./img2vid.py photo.jpg "the camera slowly pushes in while the leaves move in the wind"
+./img2vid.py photo.jpg "..." -n 2 -s 42 --seconds 3 --size 480     # two clips of 3 s, long side 480 px
+./img2vid.py photo.jpg "..." --lightning off                       # the full 20-step model at cfg 3.5: about five times slower
+./img2vid.py photo.jpg "..." --dry-run                             # only print the API workflow JSON
+```
+
+The clip keeps the start image's aspect ratio, scaled so that its long side is `--size` pixels (default 640; both sides are rounded to a multiple of 16), and lasts `--seconds` at `--fps` (default 5 s at Wan's own 16 fps: 81 frames). Prompts work best as a description of the motion: what moves, and how the camera moves.
+
+**Where clips go.** rope cannot keep videos yet, so each clip is written to `--out` (default `videos/` in the repo) as `<name>.mp4`, next to `<name>.made.json`, its recipe, and `<name>.graph.json`, the workflow ComfyUI ran: the files `rope add` takes, for when rope knows videos. The start image does go into rope, so the recipe names it by id. Names are `<time>_<image>_<model>_s<seed>`, as `img2img.py`'s. ComfyUI keeps its own copy of each clip under `ComfyUI/output/img2vid/`.
+
+**Speed.** On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step LoRAs (the first one longer, with 30 GB of models to load; `./run_comfyui.sh` in another pane keeps them loaded between runs) and about 9 minutes without.
+
+### Options
+
+| Option | Meaning |
+|---|---|
+| `-m 14b` | The model: Wan 2.2 image-to-video, the A14B high-noise and low-noise pair; the only one yet |
+| `-n N`, `-s SEED` | How many clips, one seed each, and the first seed (default: random, and printed) |
+| `--seconds S`, `--fps N` | Length (default 5) and frame rate (default 16, Wan's own; another value only changes the playback speed). The frame count is the nearest 4k+1 |
+| `--size N` | The long side of the clip in pixels (default 640) |
+| `--lightning 4\|off` | The lightx2v 4-step LoRAs (default: 4 steps, cfg 1) or the full model (20 steps, cfg 3.5) |
+| `--steps N`, `--cfg X`, `--shift X` | Sampling steps (the high-noise model takes the first half), guidance scale, and the sampling shift (default 5) |
+| `--lora FILE[:STRENGTH]` | An extra LoRA from `models/loras`, applied to both models; repeatable |
+| `--negative TEXT` | The negative prompt (default: Wan's own, in Chinese); has an effect only when cfg is above 1 |
+| `--out DIR` | Where the clips go (default `videos/`) |
+| `--library DIR`, the ComfyUI options | As `img2img.py`'s: the start image goes into the rope library, and ComfyUI is found or started the same way |
+
+From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, out=..., **comfy_options)` returns a `Result` per clip with `path`, `width`, `height` and `seconds`.
+
+**Not there yet.** A clip cannot be made again the way an image can (`--replay` is `img2img.py`'s); the recipe beside each clip is kept for when rope takes videos. Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
+
 ## The image library: rope
 
-rope keeps images by content hash. Each image has the paths its original was seen at, the recipe that made it (with its ordered input images), and a note. Folders and tags exist only in rope. It has a CLI, `rope`, and a GUI, `rope-gui`, written in Rust; their data lives in `~/.local/share/rope`, outside the repo and out of git.
+rope keeps images by content hash. Each image has the paths its original was seen at, the recipe that made it (with its ordered input images), and a note. Folders and tags exist only in rope. It has a CLI, `rope`, and a GUI, `rope-gui`, written in Rust; their data lives in `~/.local/share/rope`, outside the repo and out of git. Videos are not kept yet: `img2vid.py` writes its clips to `videos/`, with their recipes.
 
 ```bash
 cargo build --release --manifest-path rope/Cargo.toml   # binaries in rope/target/release/
-cargo install --locked --path ~/.cargo/bin
-cargo install --locked --path ~/.cargo/bin
+cargo install --locked --path rope/rope                 # or install both into ~/.cargo/bin
+cargo install --locked --path rope/rope-gui
 ```
 
 [rope/README.md](rope/README.md) covers the CLI, the GUI, how replays work, deleting, and backups.

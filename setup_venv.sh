@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create .venv next to this script with every package img2img.py and download_models.py need, so they also run as
+# Create .venv next to this script with every package img2img.py, img2vid.py and download_models.py need, so they also run as
 #   source .venv/bin/activate && python img2img.py ...
 # The package lists live in each script's "# /// script" header; uv reads them from there, so this stays in sync.
 # Re-run after a script gains a package. To rebuild from scratch: rm -rf .venv, then run this again.
@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 PYTHON_VERSION=3.12
-SCRIPTS=(img2img.py download_models.py)
+SCRIPTS=(img2img.py img2vid.py download_models.py)
 
 command -v uv >/dev/null || { echo "error: uv is not on PATH (https://docs.astral.sh/uv/)" >&2; exit 1; }
 

@@ -287,7 +287,8 @@ def context(comfy: Comfy, requests: list[Request]) -> str | None:
     return enhancer_system_prompt(comfy) if any(r.enhance for r in requests) else None
 
 
-TOOL = Tool(Path(__file__), PACKAGES, build=build, flags=image_flags, describe=describe, context=context)
+TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: build(r, inputs.uploaded, seed, context),
+            flags=image_flags, describe=describe, context=context)
 
 
 def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
