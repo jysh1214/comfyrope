@@ -3,8 +3,8 @@
 # requires-python = ">=3.11"
 # dependencies = ["huggingface_hub>=1.0,<3"]
 # ///
-"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 / Wan 2.2 model files (ComfyUI repacks) from Hugging Face,
-and optional skin LoRAs for 2511 (one of them from Civitai, which needs an API key).
+"""Download Qwen-Image-2.1 / Qwen-Image-Edit-2511 / Wan 2.2 / MiniMax H3 model files (ComfyUI repacks) from Hugging
+Face, and optional skin LoRAs for 2511 (one of them from Civitai, which needs an API key).
 
 Files land in a ComfyUI-style layout under --dest:
     <dest>/diffusion_models/   <dest>/text_encoders/   <dest>/vae/   <dest>/loras/
@@ -20,6 +20,8 @@ Examples:
     ./download_models.py 2511 --skin-loras edit-skin skin-fix --only lora   # skin LoRAs; skin-fix needs $CIVITAI_TOKEN
     ./download_models.py wan                            # Wan 2.2 image-to-video, 14B fp8 + the 4-step LoRAs
     ./download_models.py wan --wan-task ti2v            # the 5B hybrid model instead (one file, 10 GB)
+    ./download_models.py h3                             # MiniMax H3: FastVideo's 8-step FastH3 (int8, 22 GB) + encoder and VAEs
+    ./download_models.py h3 --h3-model fasth3 fl2va     # and H3 itself (int8, 21 GB) with its 8-step turbo LoRA
 
 Downloads resume on re-run; a file already present with the right size is skipped.
 Without --limit-rate the hf_xet fast path is used; with it, a plain HTTP stream with
@@ -68,6 +70,8 @@ QI = "Comfy-Org/Qwen-Image_ComfyUI"
 L2511 = "lightx2v/Qwen-Image-Edit-2511-Lightning"
 SKIN = "tlennon-ie/qwen-edit-skin"
 WAN22 = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+H3 = "Comfy-Org/MiniMax-H3"
+FASTH3 = "FastVideo/FastVideo-FastH3-Comfy"
 
 KIND_DIR = {
     "diffusion": "diffusion_models",
@@ -85,6 +89,9 @@ MODEL_ALIASES = {
     "wan": "wan-2.2",
     "wan2.2": "wan-2.2",
     "wan-2.2": "wan-2.2",
+    "h3": "minimax-h3",
+    "minimax": "minimax-h3",
+    "minimax-h3": "minimax-h3",
     "all": "all",
 }
 IMAGE_MODELS = {"qwen-image-2.1", "qwen-image-edit-2511"}  # what "all" means: the models img2img.py runs
@@ -193,6 +200,31 @@ def plan_wan_22(a: argparse.Namespace) -> list[F]:
     return files
 
 
+def plan_minimax_h3(a: argparse.Namespace) -> list[F]:
+    """MiniMax H3 (33B, video with audio, 768p), the files ComfyUI's MiniMax H3 and FastVideo FastH3 templates
+    reference. --h3-model picks the diffusion model: fasth3 is FastVideo's 8-step distillation of H3, fl2va is H3
+    itself (first/last frame to video, which text-to-video and image-to-video both are) with a turbo LoRA for few
+    steps; both are the pruned int8 files, the ones that fit a 24 GB card. The Qwen3-VL-32B text encoder and the
+    two VAEs are shared, and from the Comfy-Org repack either way."""
+    enc, enc_gb = {"nvfp4": ("nvfp4_awq", 15.7), "int8": ("int8_convrot", 27.1), "bf16": ("bf16", 51.5)}[a.h3_encoder]
+    files = [
+        F(H3, f"text_encoders/qwen3vl_32b_minimax_h3_{enc}.safetensors", "text_encoder", enc_gb),
+        F(H3, "vae/minimax_h3_video_vae_int8_convrot.safetensors", "vae", 2.81),
+        F(H3, "vae/minimax_h3_audio_vae_fp32.safetensors", "vae", 0.61),
+    ]
+    for model in a.h3_model:
+        if model == "fasth3":
+            files.append(F(FASTH3, "diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors",
+                           "diffusion", 22.1))
+            continue
+        files.append(F(H3, "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion", 21.0))
+        if a.h3_turbo != "none":
+            res = "_768p" if a.h3_turbo == "4" else ""  # the 4-step file is trained for 768p only, and says so
+            files.append(F(H3, f"loras/minimax_h3_fl2v_turbo_{a.h3_turbo}step_v1.0{res}_comfyui_bf16.safetensors",
+                           "lora", 1.96))
+    return files
+
+
 def full_catalog() -> list[F]:
     """Everything this script knows how to fetch (for --list)."""
     out: list[F] = []
@@ -205,6 +237,9 @@ def full_catalog() -> list[F]:
         out += plan_edit_2511(argparse.Namespace(edit_precision=prec, lightning="both", skin_loras=list(SKIN_LORAS)))
     for prec in ("fp8", "fp16"):
         out += plan_wan_22(argparse.Namespace(wan_task=["i2v", "t2v", "ti2v"], wan_precision=prec, wan_lightning="4"))
+    for enc in ("nvfp4", "int8", "bf16"):
+        out += plan_minimax_h3(argparse.Namespace(h3_model=["fasth3", "fl2va"], h3_encoder=enc, h3_turbo="8"))
+    out += plan_minimax_h3(argparse.Namespace(h3_model=["fl2va"], h3_encoder="nvfp4", h3_turbo="4"))
     return dedupe(out)
 
 
@@ -400,8 +435,8 @@ def fetch_throttled(f: F, dest: Path, rate: int | None, token: str | None, expec
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("models", nargs="*", metavar="MODEL",
-                   help="2.1 | 2511 | wan | all  (also: qwen-image-2.1, qwen-image-edit-2511, edit, wan2.2); "
-                        "all is the image models, 2.1 and 2511; wan is asked for by name")
+                   help="2.1 | 2511 | wan | h3 | all  (also: qwen-image-2.1, qwen-image-edit-2511, edit, wan2.2, "
+                        "minimax); all is the image models, 2.1 and 2511; wan and h3 are asked for by name")
     p.add_argument("--dest", type=Path, default=Path(__file__).resolve().parent / "models",
                    help="ComfyUI-style models root (default: ./models next to this script)")
     p.add_argument("--only", nargs="+", choices=list(KIND_DIR), metavar="KIND",
@@ -445,6 +480,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="the 14B pair's precision: fp8_scaled (default, 14.3 GB each) | fp16 (28.6 GB each)")
     g.add_argument("--wan-lightning", choices=["none", "4"], default="4",
                    help="the lightx2v 4-step LoRAs for the 14B pair (1.2 GB each, two per task; default 4)")
+
+    g = p.add_argument_group("MiniMax H3")
+    g.add_argument("--h3-model", nargs="+", choices=["fasth3", "fl2va"], default=["fasth3"], metavar="MODEL",
+                   help="which diffusion models, pruned int8: fasth3 (FastVideo's 8-step FastH3 V2, 22 GB; default), "
+                        "fl2va (H3 itself, 21 GB, with a turbo LoRA); both at once is fine")
+    g.add_argument("--h3-encoder", choices=["nvfp4", "int8", "bf16"], default="nvfp4",
+                   help="the Qwen3-VL-32B text encoder: nvfp4_awq (default, the templates' choice, 15.7 GB; a card "
+                        "without FP4 units computes it dequantized) | int8_convrot (27.1 GB) | bf16 (51.5 GB)")
+    g.add_argument("--h3-turbo", choices=["none", "4", "8"], default="8",
+                   help="the turbo LoRA for fl2va (2 GB): 8-step (default, what the template loads), 4-step (768p "
+                        "only), or none for the full 20-step model")
     return p.parse_args(argv)
 
 
@@ -462,7 +508,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if not a.models:
-        sys.exit("error: name at least one model (2.1, 2511, wan, all) or use --list / --help")
+        sys.exit("error: name at least one model (2.1, 2511, wan, h3, all) or use --list / --help")
     import importlib.util
     missing = [pkg for pkg in ("huggingface_hub", "tqdm") if importlib.util.find_spec(pkg) is None]
     if missing:
@@ -474,7 +520,7 @@ def main(argv: list[str]) -> int:
     for m in a.models:
         key = MODEL_ALIASES.get(m.lower())
         if key is None:
-            sys.exit(f"error: unknown model {m!r}; choose from 2.1, 2511, wan, all")
+            sys.exit(f"error: unknown model {m!r}; choose from 2.1, 2511, wan, h3, all")
         chosen.update(IMAGE_MODELS if key == "all" else {key})
 
     files: list[F] = []
@@ -484,6 +530,8 @@ def main(argv: list[str]) -> int:
         files += plan_edit_2511(a)
     if "wan-2.2" in chosen:
         files += plan_wan_22(a)
+    if "minimax-h3" in chosen:
+        files += plan_minimax_h3(a)
     files = dedupe(files)
     if a.only:
         files = [f for f in files if f.kind in a.only]

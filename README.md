@@ -6,7 +6,7 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 for images and Wan 2.2 for short cl
 |---|---|
 | `setup_venv.sh` | Builds `.venv`, the Python environment for the scripts below |
 | `install_comfyui.py` | Installs or updates ComfyUI with its own venv |
-| `download_models.py` | Downloads the model files from Hugging Face: the image models, optional skin LoRAs, and Wan 2.2 for video |
+| `download_models.py` | Downloads the model files from Hugging Face: the image models, optional skin LoRAs, and Wan 2.2 and MiniMax H3 for video |
 | `run_comfyui.sh` | Starts ComfyUI |
 | `img2img.py` | Makes a new image from input images and a prompt with Qwen-Image, through ComfyUI's API. Also a Python module, for running many combinations in one go |
 | `img2vid.py` | Makes a short clip from a start image and a prompt with Wan 2.2, the same way; the clips go into rope too |
@@ -138,9 +138,11 @@ uv run download_models.py 2.1 --prompt-enhancer i2i # 2.1 plus the i2i prompt en
 uv run download_models.py all --limit-rate 5M       # limit the speed to 5 MiB/s
 uv run download_models.py 2511 --skin-loras edit-skin skin-fix   # the skin LoRAs; skin-fix needs $CIVITAI_TOKEN
 uv run download_models.py wan                       # Wan 2.2 image-to-video: the 14B pair in fp8, with the 4-step LoRAs
+uv run download_models.py h3                        # MiniMax H3: FastVideo's 8-step FastH3 in int8, with the encoder and VAEs
+uv run download_models.py h3 --h3-model fasth3 fl2va   # and H3 itself in int8, with its 8-step turbo LoRA
 ```
 
-MODEL is `2.1`, `2511`, `wan` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`, `wan2.2`). `all` is the two image models, the ones `img2img.py` runs; `wan`, for `img2vid.py`, is asked for by name, alone or with the others.
+MODEL is `2.1`, `2511`, `wan`, `h3` or `all` (aliases: `qwen-image-2.1`, `qwen-image-edit-2511`, `edit`, `wan2.2`, `minimax`). `all` is the two image models, the ones `img2img.py` runs; the video models, `wan` for `img2vid.py` and `h3`, are asked for by name, alone or with the others.
 
 ### The default set
 
@@ -176,6 +178,18 @@ Alibaba's open video models (Apache 2.0), as repacked by Comfy-Org for ComfyUI's
 
 The 14B pair is a high-noise and a low-noise model that the workflow runs one after the other; `--wan-precision fp16` doubles them to 28.6 GB each. The 4-step LoRAs are what the Lightning LoRAs are for 2511; `--wan-lightning none` leaves them out. The 5B model is one file and runs within 8 GB of VRAM; it has no 4-step LoRA in the repack.
 
+### MiniMax H3
+
+MiniMax's open video model, 33B parameters, which makes video with stereo audio at 768p and 24 fps, 4 to 15 seconds long, from text or from a first and a last frame (its [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/LICENSE): free, commercial use included under 20 M USD a year, outside the EU, UK, South Korea and USA; the outputs may not train other models). ComfyUI runs it natively, through its own templates ([ComfyUI's FastH3 guide](https://docs.comfy.org/tutorials/video/minimax/minimax-h3-fastvideo)); `img2vid.py` does not run it yet. `--h3-model` picks the diffusion models, both if wanted; the pruned int8 files are the ones a 24 GB card holds:
+
+| MODEL | Files | Size |
+|---|---|---|
+| `fasth3` (default) | `diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot`: FastVideo's 8-step distillation of H3, text-to-video and image-to-video, fixed at 8 steps | 22.1 GB |
+| `fl2va` | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot`: H3 itself, with `loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16` for 8 steps (`--h3-turbo`) | 21.0 + 2.0 GB |
+| both | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq` (`--h3-encoder`), `vae/minimax_h3_video_vae_int8_convrot`, `vae/minimax_h3_audio_vae_fp32` | 15.7 + 2.8 + 0.6 GB |
+
+The text encoder is Qwen3-VL-32B. The templates load its nvfp4 file; an RTX 40 card has no FP4 units, so ComfyUI computes it dequantized, slower but within memory. `--h3-encoder int8` is the 27.1 GB file with native int8 compute, `bf16` the 51.5 GB one. On an RTX 4090, FastVideo measured a 5-second FastH3 clip at about 55 s at 480p and 155 s at 768p; others measured H3 itself with the turbo LoRA at about 2 minutes for 5 seconds at 1280×736, out of memory at 15 seconds at 1367×768 and at 20 seconds at any size.
+
 ### Options
 
 | Option | Description |
@@ -199,6 +213,9 @@ The 14B pair is a high-noise and a low-noise model that the workflow runs one af
 | `--wan-task TASK…` | Wan 2.2 models: `i2v` (default), `t2v`, `ti2v` (see above) |
 | `--wan-precision fp8\|fp16` | The Wan 14B pair: fp8_scaled (default, 14.3 GB each) or fp16 (28.6 GB each) |
 | `--wan-lightning none\|4` | The lightx2v 4-step LoRAs for the Wan 14B pair; fetched by default |
+| `--h3-model MODEL…` | MiniMax H3 diffusion models: `fasth3` (default), `fl2va` (see above) |
+| `--h3-encoder nvfp4\|int8\|bf16` | H3's Qwen3-VL-32B text encoder: nvfp4_awq (default, 15.7 GB), int8_convrot (27.1 GB), bf16 (51.5 GB) |
+| `--h3-turbo none\|4\|8` | The turbo LoRA for `fl2va`: 8-step (default, what the template loads), 4-step (768p only), or none for the full 20-step model |
 
 ### Behavior
 
@@ -210,7 +227,7 @@ The 14B pair is a high-noise and a low-noise model that the workflow runs one af
 
 ### Adding files
 
-The file lists are `plan_qwen_image_21()`, `plan_edit_2511()` and `plan_wan_22()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on); `name=` saves the file under another name. A file that is not on Hugging Face takes `url=`, `size=` and `sha256=` instead, as the Civitai entry in `SKIN_LORAS` does; it is fetched over plain HTTP and checked against the hash. Check with `--list` afterwards.
+The file lists are `plan_qwen_image_21()`, `plan_edit_2511()`, `plan_wan_22()` and `plan_minimax_h3()` in the script, one `F(repo, path, kind, approx_gb)` per file. `kind` picks the subfolder (`diffusion` → `diffusion_models/`, and so on); `name=` saves the file under another name. A file that is not on Hugging Face takes `url=`, `size=` and `sha256=` instead, as the Civitai entry in `SKIN_LORAS` does; it is fetched over plain HTTP and checked against the hash. Check with `--list` afterwards.
 
 ## Starting ComfyUI: run_comfyui.sh
 
@@ -231,7 +248,7 @@ The file lists are `plan_qwen_image_21()`, `plan_edit_2511()` and `plan_wan_22()
 
 ### Templates
 
-In the UI, open Workflow → Browse Templates on the left and search for `Qwen` or `Wan`:
+In the UI, open Workflow → Browse Templates on the left and search for `Qwen`, `Wan` or `MiniMax`:
 
 | Template | Files it needs |
 |---|---|
@@ -242,6 +259,8 @@ In the UI, open Workflow → Browse Templates on the left and search for `Qwen` 
 | Wan 2.2 14B Image to Video | The `download_models.py wan` files; runs as it is. `img2vid.py` runs this template without the UI |
 | Wan 2.2 14B Text to Video | `download_models.py wan --wan-task t2v` |
 | Wan 2.2 5B Video Generation | `download_models.py wan --wan-task ti2v` |
+| FastVideo FastH3: Image to Video | The `download_models.py h3` files; runs as it is |
+| MiniMax H3: Image to Video | `download_models.py h3 --h3-model fl2va` |
 
 The 2.1 templates load the prompt enhancer in a CLIPLoader inside a subgraph. ComfyUI checks the file names of every connected node before running, so even with `refine_prompt` off, a missing enhancer file fails with `Value not in list`.
 
