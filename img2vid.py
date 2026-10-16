@@ -10,7 +10,7 @@
 # ]
 # ///
 """Image to video from the command line: a start image plus a prompt make a short clip with Wan 2.2, the 14B
-image-to-video pair, through ComfyUI's API. A first version, built on comfycore.py like img2img.py.
+image-to-video pair, through ComfyUI's API. Built on comfycore.py like img2img.py.
 
     ./img2vid.py photo.jpg "the camera slowly pushes in while the leaves move in the wind"
     ./img2vid.py photo.jpg "..." -n 2 -s 42 --seconds 3 --size 480
@@ -22,12 +22,11 @@ lasts --seconds at --fps (default 5 s at Wan's own 16 fps: 81 frames). The start
 reads its inputs (HEIC, RAW and the like are converted first). Prompts work best as a description of the
 motion: what moves, and how the camera moves.
 
-rope cannot keep videos yet, so each clip goes to --out (default videos/ in the repo), or to a folder under it
-with --into, as <name>.mp4, next to <name>.made.json, its recipe, and <name>.graph.json, the workflow ComfyUI
-ran: the files rope add takes, for when it knows videos. The start image does go into rope, so the recipe names it by id. Names are
-<time>_<image>_<model>_s<seed>, as img2img.py's. ComfyUI keeps its own copy of each clip under
-ComfyUI/output/img2vid/. The ComfyUI and --library options are img2img.py's, and so is the Python side:
-import img2vid, build a Request per clip, and run() them in one go.
+Each clip goes into rope like an image, with its recipe, the workflow ComfyUI ran, its first frame for the
+thumbnail, and its start image as its upstream; rope-gui plays it. --into, --tag, --note and --library are
+img2img.py's, and so is the Python side: import img2vid, build a Request per clip, and run() them in one go.
+Names are <time>_<image>_<model>_s<seed>, as img2img.py's. ComfyUI keeps its own copy of each clip under
+ComfyUI/output/img2vid/.
 
 On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step
 LoRAs (the first one longer: 30 GB of models to load) and about 9 minutes without.
@@ -42,16 +41,13 @@ import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 
-from comfycore import (FETCH, HERE, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Job, Library, Options,
-                       Result, Run, Tool, add_comfy_args, add_loras, check_packages, exact, link, parse_lora,
-                       prepare, recipe, rope_ref, run_name, run_requests, tilde, upload_name)
+from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Library, Options, Result, Tool,
+                       add_comfy_args, add_loras, check_packages, exact, link, parse_lora, prepare, rope_ref,
+                       run_requests, upload_name)
 
-__all__ = ["OUT", "SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
-
-OUT = HERE / "videos"  # where the clips go until rope keeps videos
+__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
 
 # Model files as ComfyUI's template names them (download_models.py wan fetches them).
 WAN22 = {
@@ -96,7 +92,7 @@ class Request:
     seconds: float | None = None  # default 5
     fps: int | None = None  # default 16, Wan's own rate; another value only changes the playback speed
     size: int | None = None  # the long side of the clip, in pixels; default 640
-    into: str | None = None  # a folder under `out` for the clips, e.g. "trips/京都"; the rope folder once rope keeps videos
+    into: str | None = None  # the rope folder for the clips, e.g. "trips/京都", made if there is none; None: unfiled
     tags: list[str] = field(default_factory=list)
     note: str | None = None
 
@@ -111,7 +107,7 @@ class Request:
         r.lora = [parse_lora(l) if isinstance(l, str) else (str(l[0]), float(l[1])) for l in loras]
         r.into = self.into or None
         if r.into and (Path(r.into).is_absolute() or ".." in Path(r.into).parts):
-            raise ValueError("into is a folder under out: a relative path, without ..")
+            raise ValueError("into is a rope folder: a relative path, without ..")
         r.note = self.note or None
         if len(r.images) != 1:
             raise ValueError("exactly one start image is needed")
@@ -220,53 +216,28 @@ def describe(r: Request, base: int) -> str:
     return ", ".join(bits)
 
 
-def keep_video(out: Path, run: Run, job: Job, data: bytes, text: str, suffix: str) -> str:
-    """Writes a clip to `out`, or to `out`/into with Request.into, with its recipe and the workflow, as a Result on
-    its job, and says where it went. A stopgap until rope keeps videos: the three files are what `rope add` takes.
-    A name already taken in that folder (the same image, model and seed in one run, with other settings) gets -2,
-    -3, ... rather than overwrite anything."""
-    r = job.request
-    dest = out / r.into if r.into else out
-    dest.mkdir(parents=True, exist_ok=True)
-    base = name = run_name(run.when, job.inputs.names[0], r.model, job.seed)
-    n = 1
-    while (dest / f"{name}{suffix}").exists():
-        n += 1
-        name = f"{base}-{n}"
-    made = recipe(run, job, video_flags(r, job.seed), text)
-    path = dest / f"{name}{suffix}"
-    path.write_bytes(data)
-    (dest / f"{name}.made.json").write_text(json.dumps(made, ensure_ascii=False, indent=1), "utf-8")
-    (dest / f"{name}.graph.json").write_text(json.dumps(job.graph.nodes, ensure_ascii=False), "utf-8")
-    wan = next(n["inputs"] for n in job.graph.nodes.values() if n["class_type"] == "WanImageToVideo")
-    result = Result(r, job.index, job.seed, path=path, folder=r.into, created=True, width=wan["width"],
-                    height=wan["height"], seconds=job.took)
-    job.results.append(result)
-    return tilde(path)
-
-
 TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: build(r, inputs, seed),
             flags=video_flags, describe=describe, unit="clip")
 
 
-def run(requests: Request | Iterable[Request], *, out: str | Path = OUT, server: str = SERVER,
-        keep_server: bool = False, no_start: bool = False, comfy_args: str | Iterable[str] = (),
-        timeout: int = TIMEOUT, fresh: bool = False, library: str | None = None) -> list[Result]:
-    """Makes the clips of every request, all through one ComfyUI, and writes them to `out` (see the top of this
-    file). Returns a Result per clip: the requests in order, and each request's clips in seed order; `path` is the
-    clip, `width` and `height` its size. Otherwise as img2img.run(): every request is checked first, a failure
-    raises Error and drops the jobs still queued, Ctrl-C does the same, and the keyword arguments are the ComfyUI
-    and --library options with the same defaults."""
+def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
+        no_start: bool = False, comfy_args: str | Iterable[str] = (), timeout: int = TIMEOUT, fresh: bool = False,
+        library: str | None = None) -> list[Result]:
+    """Makes the clips of every request, all through one ComfyUI, each into rope with its recipe, as img2img.run()
+    does for images: every request is checked first, a failure raises Error and drops the jobs still queued, Ctrl-C
+    does the same, and the keyword arguments are the ComfyUI and --library options with the same defaults. Returns
+    a Result per clip, the requests in order and each request's clips in seed order; `width` and `height` are the
+    clip's as rope measured it."""
     flags = shlex.split(comfy_args) if isinstance(comfy_args, str) else list(comfy_args)
     opts = Options(server, keep_server, no_start, flags, timeout, fresh, library)
     wanted = [requests] if isinstance(requests, Request) else requests
-    return run_requests(TOOL, wanted, opts, keep=partial(keep_video, Path(out)))
+    return run_requests(TOOL, wanted, opts)
 
 
 # ---------------------------------------------------------------- cli
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    """The command line, with the Request it asks for as .request and the rest as .options, .out and .dry_run."""
+    """The command line, with the Request it asks for as .request and the rest as .options and .dry_run."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("image", type=Path, help="the start image, or @ID for an image in rope")
     p.add_argument("prompt", help="the motion to make, in Chinese or English")
@@ -284,12 +255,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--seconds", type=float, help="length of the clip (default 5)")
     p.add_argument("--fps", type=int, help="frames per second (default 16, Wan's own; another value only changes the speed)")
     p.add_argument("--size", type=int, help="the long side of the clip in pixels (default 640); the start image's aspect ratio is kept")
-    g = p.add_argument_group("where the clips go")
-    g.add_argument("--out", type=Path, default=OUT, metavar="DIR",
-                   help=f"folder for the clips, their recipes and workflows (default {tilde(OUT)})")
+    g = p.add_argument_group("rope library", "Clips go into the rope library (see rope/README.md), and so does the start "
+                             "image, so that a clip can be made again after it is moved or deleted. rope has to be built first.")
     g.add_argument("--into", metavar="FOLDER",
-                   help="a folder under --out for these clips, e.g. trips/京都; the rope folder once rope keeps videos")
-    g.add_argument("--library", metavar="DIR", help="the rope library the start image goes into (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
+                   help="the rope folder for the clips, e.g. trips/京都, made if there is none (default: unfiled)")
+    g.add_argument("--tag", dest="tags", action="append", default=[], metavar="TAG", help="tag the clips; repeatable")
+    g.add_argument("--note", help="a note on each clip")
+    g.add_argument("--library", metavar="DIR", help="the rope library (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
     g = p.add_argument_group("ComfyUI")
     add_comfy_args(g)
     g.add_argument("--dry-run", action="store_true", help="print the API workflow JSON and stop; nothing is uploaded or run")
@@ -297,7 +269,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     try:
         a.request = Request([a.image], a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
                             steps=a.steps, cfg=a.cfg, shift=a.shift, lora=a.lora, lightning=a.lightning,
-                            seconds=a.seconds, fps=a.fps, size=a.size, into=a.into).settled()
+                            seconds=a.seconds, fps=a.fps, size=a.size, into=a.into, tags=a.tags,
+                            note=a.note).settled()
     except ValueError as e:
         p.error(str(e))
     a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
@@ -324,7 +297,7 @@ def main(argv: list[str]) -> int:
         seed = a.request.seed if a.request.seed is not None else 0
         print(json.dumps(workflow(a.request, seed, fresh=a.fresh, library=a.library), indent=2, ensure_ascii=False))
         return 0
-    run(a.request, out=a.out, **vars(a.options))
+    run(a.request, **vars(a.options))
     return 0
 
 

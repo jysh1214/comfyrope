@@ -6,7 +6,7 @@ rope keeps images, and the clips made from them, by the hash of their content. E
 - **recipe**: for an image a tool made, the command, the workflow sent to ComfyUI, and the input images, in order.
 - **note**: free text.
 
-Folders and tags exist only in rope; files on disk are never moved. `img2img.py` puts its inputs and results into rope on every run, so a result can be made again after its inputs are moved or deleted.
+Folders and tags exist only in rope; files on disk are never moved. `img2img.py` and `img2vid.py` put their inputs and results into rope on every run, so a result can be made again after its inputs are moved or deleted.
 
 Three crates in one Cargo workspace:
 
@@ -112,7 +112,7 @@ An image's id is the SHA-256 of its file:
 | `rope fav ID... [--off]` | Mark images as favorites, or unmark them; rope-gui shows favorites first |
 | `rope prompt add TITLE [TEXT \| --from ID]`, `rope prompt ls`, `rope prompt show NAME`, `rope prompt edit NAME [--title T] [--text T] [-e]`, `rope prompt mv NAME N`, `rope prompt rm NAME` | Keep prompts to use again. `show` prints the text, so `"$(rope prompt show 黃昏海邊)"` puts it in a command; `--from` takes the prompt an image was made with; `mv` puts it at position N; NAME is a title or an id |
 | `rope lineage ID [--up \| --down]` | The tree of images above or below |
-| `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full `img2img.py` command, to change and run as a variation |
+| `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full command of the tool that made it (`img2img.py`, `img2vid.py`), to change and run as a variation |
 | `rope rm ID...`, `rope restore ID...` | Move images to the trash, or back out |
 | `rope purge ID... \| --trash [--break-lineage]` | Delete for good; see [Deleting](#deleting) |
 | `rope check [--hash] [--fix]` | Check the library; `--hash` verifies every file against its hash; `--fix` repairs the catalog, writes outdated `repro.sh` again and makes a clip's missing poster frame and length |

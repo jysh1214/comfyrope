@@ -7,8 +7,6 @@
 /models/
 # rope: the Rust build output
 /rope/target/
-# img2vid.py: the clips, until rope keeps videos
-/videos/
 
 # Python bytecode
 __pycache__/

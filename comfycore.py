@@ -743,7 +743,10 @@ def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args,
     go to rescue/ in the library (or the system's temp folder) with the command that brings them in later."""
     lib = run.lib
     graph = json.dumps(job.graph.nodes, ensure_ascii=False)
-    with tempfile.TemporaryDirectory(prefix="img2img-result-") as tmp:
+    # inside the library: rope records where a file came from, and a temp path is nowhere worth remembering
+    scratch = lib.root / "tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{run.tool.file.stem}-result-", dir=scratch) as tmp:
         files = Path(tmp) / f"{name}{suffix}", Path(tmp) / "made.json", Path(tmp) / "graph.json"
         files[0].write_bytes(data)
         files[1].write_text(made, "utf-8")
@@ -752,7 +755,7 @@ def send_result(run: Run, name: str, data: bytes, made: str, job: Job, args,
             return lib.call(*args(*files)), None
         except LibraryError as e:
             error = e
-    for base in (lib.root / "rescue", Path(tempfile.gettempdir()) / "img2img-rescue"):
+    for base in (lib.root / "rescue", Path(tempfile.gettempdir()) / f"{run.tool.file.stem}-rescue"):
         try:
             base.mkdir(parents=True, exist_ok=True)
             folder = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=base))
@@ -907,7 +910,8 @@ def keep_result(run: Run, job: Job, data: bytes, text: str, suffix: str) -> str:
     r = job.request
 
     def args(file: Path, made: Path, graph: Path) -> list[str]:
-        out = ["add", str(file), f"--made={made}", f"--graph={graph}", f"--name={name}", f"--repo={HERE}"]
+        out = ["add", str(file), f"--made={made}", f"--graph={graph}", f"--name={name}", f"--repo={HERE}",
+               f"--via={run.tool.name}"]
         if r.into:
             out += [f"--into={r.into}", "--file-inputs"]
         out += [f"--tag={t}" for t in r.tags]
@@ -924,6 +928,8 @@ def keep_result(run: Run, job: Job, data: bytes, text: str, suffix: str) -> str:
         return "not in rope; see above"
     result.id, result.short, result.path = answer["id"], answer["short"], Path(answer["path"])
     result.folder, result.created = answer["folder"], answer["created"]
+    if not result.width:  # not a PNG (a clip): rope measured it
+        result.width, result.height = answer.get("width") or 0, answer.get("height") or 0
     where = f"{result.short}  {result.folder or '/'}"
     return where if result.created else f"{where}  (rope had these bytes already)"
 

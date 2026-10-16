@@ -4,8 +4,8 @@ copy it, fill in the three numbered parts, and run it from the repo root:
     .venv/bin/python run_img2vid.py --list    # only print the batch, after checking every request
     .venv/bin/python run_img2vid.py           # make them all, through one ComfyUI
 
-Every clip lands in a folder under videos/ named after its combination, with its recipe. README.md, "Making a clip
-from an image", describes Request, run() and Result; run_img2img.py is the same template for images."""
+Every clip lands in a rope folder named after its combination, with its recipe. README.md, "Making a clip from an
+image", describes Request, run() and Result; run_img2img.py is the same template for images."""
 import dataclasses
 import itertools
 import sys
@@ -21,7 +21,7 @@ BASE = img2vid.Request(
     seed=42,
     seconds=5,
     size=640,
-    into="tests/motion",  # the prefix of the folders under videos/: into_setting_loras, see folder()
+    into="tests/motion",  # the prefix of the rope folders: into_setting_loras, see folder()
     # the rest, with their defaults: negative=None (Wan's own), steps=None, cfg=None, shift=None, fps=None,
     # lightning=None ("4"), lora=[], tags=[], note=None
 )
@@ -33,7 +33,7 @@ SHIFT = [3, 5, 8]  # ModelSamplingSD3's shift; the template's value is 5
 LORAS: list[str] = []  # name[:strength] as on the command line (.safetensors implied); applied to both models
 TRIGGERS: dict[str, str] = {}  # LoRA name (no strength, no .safetensors) -> the prompt its author asks for
 
-# The options, as run() takes them: out, server, keep_server, no_start, comfy_args, timeout, fresh, library.
+# The options, as run() takes them: server, keep_server, no_start, comfy_args, timeout, fresh, library.
 OPTIONS = {"fresh": False}
 
 
@@ -49,8 +49,8 @@ def lora_name(lora: str | tuple[str, float]) -> str:
 
 
 def folder(lightning: str, shift: float, loras: tuple[str, ...]) -> str:
-    """The folder of a combination under videos/: into_L<lightning>_shift<shift>[_loras], e.g. tests/motion_L4_shift5
-    or tests/motion_Loff_shift8_motion:0.8. BASE's own LoRAs are in every combination, so they are not in the name."""
+    """The rope folder of a combination: into_L<lightning>_shift<shift>[_loras], e.g. tests/motion_L4_shift5 or
+    tests/motion_Loff_shift8_motion:0.8. BASE's own LoRAs are in every combination, so they are not in the name."""
     if not BASE.into:
         raise ValueError("BASE.into is needed: the folders are named from it")
     bits = [BASE.into, f"L{lightning}_shift{shift:g}"]
@@ -86,8 +86,9 @@ def main() -> None:
     results = img2vid.run(requests, **OPTIONS)
     print()
     for r in results:
-        print(f"{r.path.name}  seed {r.seed}  {r.seconds:6.1f}s  {r.folder}")
-    print(f"{len(results)} clips in {len(dict.fromkeys(r.folder for r in results))} folders")
+        made = f"{r.seconds:.1f}s" if r.created else "cached"
+        print(f"{r.short}  seed {r.seed}  {made:>7}  {r.folder}")
+    print(f"{len(results)} clips in {len(dict.fromkeys(r.folder for r in results))} rope folders")
 
 
 if __name__ == "__main__":

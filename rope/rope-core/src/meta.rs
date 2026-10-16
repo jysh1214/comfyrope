@@ -137,6 +137,15 @@ impl Meta {
         self.made.as_ref()?.get(key)?.as_str()
     }
 
+    /// The script that made it, by the recipe's "by": img2img.py unless the recipe names another. A bare file
+    /// name, so that nothing in a recipe can point repro.sh outside the repo.
+    pub fn tool(&self) -> &str {
+        match self.made_str("by") {
+            Some(by) if by.ends_with(".py") && !by.contains('/') && !by.starts_with('.') => by,
+            _ => "img2img.py",
+        }
+    }
+
     /// The recipe's flags, as argv items.
     pub fn flags(&self) -> Vec<String> {
         self.made

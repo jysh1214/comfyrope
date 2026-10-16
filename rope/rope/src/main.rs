@@ -77,7 +77,7 @@ enum Cmd {
         #[arg(long, hide = true)]
         repo: Option<PathBuf>,
     },
-    /// Add an image a tool made, with its recipe (img2img.py uses this)
+    /// Add an image or clip a tool made, with its recipe (img2img.py and img2vid.py use this)
     #[command(hide = true)]
     Add {
         file: PathBuf,
@@ -98,6 +98,9 @@ enum Cmd {
         /// Also put its unfiled inputs in FOLDER
         #[arg(long)]
         file_inputs: bool,
+        /// The tool handing it in, for the record
+        #[arg(long, default_value = "img2img.py", hide = true)]
+        via: String,
         #[arg(long)]
         repo: Option<PathBuf>,
     },
@@ -343,13 +346,12 @@ fn run(cli: Cli) -> Result<()> {
             let new = NewImage { via, folder: into_folder(&lib, into.as_deref())?, tags, note, ..Default::default() };
             import(&lib, json, &paths, tree.then(|| into.as_deref().unwrap_or("")), &new)
         }
-        Cmd::Add { file, made, graph, name, into, tags, note, file_inputs, repo } => {
+        Cmd::Add { file, made, graph, name, into, tags, note, file_inputs, via, repo } => {
             set_repo(&lib, repo.as_deref())?;
             let made = with_env_stored(&lib, read_json(&made)?)?;
             let graph = graph.map(|g| read_json(&g)).transpose()?;
             let folder = into_folder(&lib, into.as_deref())?;
-            let new =
-                NewImage { name, made: Some(made), graph, via: "img2img.py".into(), folder, tags, note, file_inputs };
+            let new = NewImage { name, made: Some(made), graph, via, folder, tags, note, file_inputs };
             let added = store::add(&lib, &file, &new)?;
             let meta = store::load(&lib, &added.sha)?;
             emit(json, added_json(&lib, &meta, added.created, added.restored)?, || {
@@ -1111,6 +1113,7 @@ fn added_json(lib: &Library, meta: &Meta, created: bool, restored: bool) -> Resu
     Ok(json!({
         "id": meta.sha256, "short": meta.short(), "path": store::image_path(lib, meta), "name": meta.name,
         "created": created, "restored": restored, "pixels": meta.image.pixels,
+        "width": meta.image.width, "height": meta.image.height,
         "folder": catalog.entry(&meta.sha256).folder.map(|f| catalog.folder_path(&f)),
     }))
 }
