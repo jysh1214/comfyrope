@@ -142,6 +142,7 @@ The window runs on its own: the command returns at once, and closing the termina
 - A clip shows its first frame, with a play mark and its length in the bottom-left corner.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
+- Drag a thumbnail onto a folder on the left to move it there; the selection drags together, with a ghost of the first image and the count at the pointer. Unfiled takes drops too, and so do a tag, which adds it, and the trash. A closed folder opens after half a second under the pointer, the list scrolls when the pointer is near its top or bottom, and Esc lets go.
 - **Move to…** (in that menu, on M, and as the Folder button on the right) opens a dialog over the folders: type part of a path and the list narrows to the folders that have it, the ones whose own name starts with it first; ↑ ↓ pick, Enter moves, or click one. With nothing typed, the folders moved to lately come first. A path no folder has yet is made on Enter, with the folders on the way to it.
 
 **Right**, the selected image:

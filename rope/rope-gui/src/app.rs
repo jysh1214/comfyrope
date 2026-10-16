@@ -80,6 +80,12 @@ impl Dialog {
 /// How many of the folders images were moved to lately the Move to dialog lists first.
 const RECENT_FOLDERS: usize = 5;
 
+/// What a drag from the grid carries: the images being dragged, to drop on a folder, a tag or the trash.
+struct Drag(Vec<String>);
+
+/// How long dragged images have to stay over a closed folder before it opens for them.
+const HOVER_OPEN: Duration = Duration::from_millis(500);
+
 #[derive(Clone, Copy, PartialEq)]
 enum Pick {
     One,
@@ -96,6 +102,8 @@ enum Action {
     Trash(Vec<String>),
     Restore(Vec<String>),
     MoveTo(Vec<String>, Option<String>),
+    /// Images are being dragged over this closed folder: open it once they have stayed a moment.
+    DragOver(String),
     AddTag(Vec<String>, String),
     RemoveTag(Vec<String>, String),
     Dialog(Dialog),
@@ -169,6 +177,8 @@ pub struct App {
     open_on_load: Option<String>,
     /// Where images were moved to lately, the latest first; None is unfiled. The Move to dialog lists them first.
     recent_folders: Vec<Option<String>>,
+    /// The closed folder dragged images are over, and since when.
+    drag_over: Option<(String, Instant)>,
     /// Looking at one image as large as the window allows.
     viewer: Option<viewer::Viewer>,
     /// The prompt open in the editor of the Prompts page.
@@ -223,6 +233,7 @@ impl App {
             scroll_to: None,
             open_on_load: open,
             recent_folders: Vec::new(),
+            drag_over: None,
             viewer: None,
             prompt: None,
             prompt_drag: None,
@@ -438,6 +449,24 @@ impl App {
                 })?;
                 self.refresh();
                 self.say(format!("restored {n} image(s)"), false);
+            }
+            Action::DragOver(id) => {
+                let since = match self.drag_over.take() {
+                    Some((f, t)) if f == id => t,
+                    _ => Instant::now(),
+                };
+                if let Some(ctx) = ctx {
+                    if since.elapsed() >= HOVER_OPEN {
+                        let fid = egui::Id::new(("folder", &id));
+                        let mut state =
+                            egui::collapsing_header::CollapsingState::load_with_default_open(ctx, fid, true);
+                        state.set_open(true);
+                        state.store(ctx);
+                    } else {
+                        ctx.request_repaint_after(HOVER_OPEN - since.elapsed());
+                        self.drag_over = Some((id, since));
+                    }
+                }
             }
             Action::MoveTo(ids, folder) => {
                 store::edit_catalog(&self.lib, "mv", &ids, |c| {
@@ -659,16 +688,40 @@ impl App {
     fn sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let model = self.model();
         let counts = &model.counts;
-        let row = |ui: &mut egui::Ui, view: View, text: String, actions: &mut Vec<Action>| {
-            if sidebar_row(ui, self.view == view, text).clicked() {
+        let row = |ui: &mut egui::Ui, view: View, text: String, actions: &mut Vec<Action>| -> egui::Response {
+            let resp = sidebar_row(ui, self.view == view, text);
+            if resp.clicked() {
                 actions.push(Action::View(view));
             }
+            resp
         };
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // images dragged near the top or the bottom scroll the list, to reach a folder out of sight
+            if egui::DragAndDrop::has_payload_of_type::<Drag>(ui.ctx())
+                && let Some(pos) = ui.ctx().pointer_latest_pos()
+                && ui.clip_rect().contains(pos)
+            {
+                let (clip, edge) = (ui.clip_rect(), 28.0);
+                let dy = if pos.y < clip.top() + edge {
+                    6.0
+                } else if pos.y > clip.bottom() - edge {
+                    -6.0
+                } else {
+                    0.0
+                };
+                if dy != 0.0 {
+                    ui.scroll_with_delta(Vec2::new(0.0, dy));
+                    ui.ctx().request_repaint();
+                }
+            }
             row(ui, View::Prompts, format!("Prompts  ({})", model.prompts.prompts.len()), actions);
             ui.add_space(8.0);
             row(ui, View::All, format!("All  ({})", model.shown), actions);
-            row(ui, View::Unfiled, format!("Unfiled  ({})", counts.get(&None).copied().unwrap_or(0)), actions);
+            let unfiled =
+                row(ui, View::Unfiled, format!("Unfiled  ({})", counts.get(&None).copied().unwrap_or(0)), actions);
+            if let Some(ids) = drop_on(ui, &unfiled) {
+                actions.push(Action::MoveTo(ids, None));
+            }
             if let View::MadeFrom(id) = &self.view {
                 // where the panel's Show button went; gone again once another view is chosen
                 row(ui, self.view.clone(), format!("{}  ({})", self.title(), model.made_from(id)), actions);
@@ -686,13 +739,19 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Tags").strong());
                 for (t, n) in tags {
-                    row(ui, View::Tag(t.clone()), format!("#{t}  ({n})"), actions);
+                    let tag = row(ui, View::Tag(t.clone()), format!("#{t}  ({n})"), actions);
+                    if let Some(ids) = drop_on(ui, &tag) {
+                        actions.push(Action::AddTag(ids, t.clone()));
+                    }
                 }
             }
             ui.add_space(8.0);
             let trash = sidebar_row(ui, self.view == View::Trash, format!("Trash  ({})", model.trashed));
             if trash.clicked() {
                 actions.push(Action::View(View::Trash));
+            }
+            if let Some(ids) = drop_on(ui, &trash) {
+                actions.push(Action::Trash(ids));
             }
             trash.context_menu(|ui| {
                 let clean = ui.add_enabled(model.trashed > 0, egui::Button::new("Clean"));
@@ -790,25 +849,60 @@ impl App {
                     if resp.clicked() {
                         actions.push(Action::View(View::Folder(id.to_owned())));
                     }
+                    if let Some(ids) = drop_on(ui, &resp) {
+                        actions.push(Action::MoveTo(ids, Some(id.to_owned())));
+                    }
                     menu(&resp, actions);
                 });
             } else {
+                // the id is a plain one, so that DragOver can find the state and open the folder
                 let state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
-                    ui.make_persistent_id(("folder", id)),
+                    egui::Id::new(("folder", id)),
                     true,
                 );
+                let open = state.is_open();
                 state
                     .show_header(ui, |ui| {
                         let resp = sidebar_row(ui, selected, text);
                         if resp.clicked() {
                             actions.push(Action::View(View::Folder(id.to_owned())));
                         }
+                        if let Some(ids) = drop_on(ui, &resp) {
+                            actions.push(Action::MoveTo(ids, Some(id.to_owned())));
+                        }
+                        if !open && resp.dnd_hover_payload::<Drag>().is_some() {
+                            actions.push(Action::DragOver(id.to_owned()));
+                        }
                         menu(&resp, actions);
                     })
                     .body(|ui| self.folder_rows(ui, Some(id), counts, actions));
             }
         }
+    }
+
+    /// What follows the pointer while images are dragged: the first one's thumbnail and how many there are.
+    fn drag_ghost(&mut self, ctx: &egui::Context, ids: &[String], pos: egui::Pos2) {
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-ghost")));
+        let count = if ids.len() == 1 { "1 image".to_owned() } else { format!("{} images", ids.len()) };
+        let text = painter.layout_no_wrap(count, FontId::proportional(13.0), Color32::WHITE);
+        let first = ids.first().and_then(|id| {
+            let item = self.model.as_ref()?.items.get(id)?;
+            let source = Source { file: item.file.clone(), fallback: item.fallback.clone() };
+            self.thumbs.get(&Key { id: id.clone(), size: thumbs::GRID }, || source)
+        });
+        let (side, pad) = (48.0, 6.0);
+        let width = pad + first.as_ref().map_or(0.0, |_| side + pad) + text.size().x + pad;
+        let rect = Rect::from_min_size(pos + Vec2::new(14.0, 14.0), Vec2::new(width, side + 2.0 * pad));
+        painter.rect_filled(rect, 6.0, Color32::from_black_alpha(170));
+        let mut x = rect.min.x + pad;
+        if let Some(tex) = first {
+            let fitted = fit(tex.size_vec2(), Vec2::splat(side));
+            let at = Rect::from_center_size(egui::pos2(x + side / 2.0, rect.center().y), fitted);
+            painter.image(tex.id(), at, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+            x += side + pad;
+        }
+        painter.galley(egui::pos2(x, rect.center().y - text.size().y / 2.0), text, Color32::WHITE);
     }
 
     fn grid(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -848,7 +942,7 @@ impl App {
     }
 
     fn cell(&mut self, ui: &mut egui::Ui, id: &str, size: Vec2, actions: &mut Vec<Action>) {
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         if !ui.is_rect_visible(rect) {
             return;
         }
@@ -933,6 +1027,13 @@ impl App {
             actions.push(Action::Look(id.to_owned()));
         }
         let targets: Vec<String> = if selected { self.selected.clone() } else { vec![id.to_owned()] };
+        if resp.drag_started() {
+            // the selection drags together; an image outside it drags alone, and becomes the selection
+            if !selected {
+                actions.push(Action::Select(id.to_owned(), Pick::One));
+            }
+            egui::DragAndDrop::set_payload(ui.ctx(), Drag(targets.clone()));
+        }
         let trash_view = self.view == View::Trash;
         let model = self.model.as_ref().expect("loaded");
         let made = model.items.get(id).is_some_and(|i| i.made);
@@ -1697,6 +1798,13 @@ impl App {
             .default_width(380.0)
             .show(ctx, |ui| self.details(ui, &mut actions));
         egui::CentralPanel::default().show(ctx, |ui| self.grid(ui, &mut actions));
+        if let Some(drag) = egui::DragAndDrop::payload::<Drag>(ctx)
+            && let Some(pos) = ctx.pointer_latest_pos()
+        {
+            self.drag_ghost(ctx, &drag.0, pos);
+        } else {
+            self.drag_over = None;
+        }
         self.dialogs(ctx);
         for a in actions {
             self.apply(a, Some(ctx));
@@ -1707,6 +1815,16 @@ impl App {
 /// A row of the sidebar: `text` on a selectable button that is cut with … where the panel is too narrow for it,
 /// so a long folder name never widens the panel (egui widens a panel to what is drawn in it). A cut row shows
 /// its whole text on hover.
+/// Marks `resp` as where dragged images would land while they are over it, and returns them when they are
+/// dropped on it.
+fn drop_on(ui: &egui::Ui, resp: &egui::Response) -> Option<Vec<String>> {
+    if resp.dnd_hover_payload::<Drag>().is_some() {
+        let stroke = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
+        ui.painter().rect_stroke(resp.rect, 4.0, stroke, egui::StrokeKind::Inside);
+    }
+    resp.dnd_release_payload::<Drag>().map(|d| d.0.clone())
+}
+
 fn sidebar_row(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
     let galley = egui::WidgetText::from(text.as_str()).into_galley(
         ui,
@@ -1988,6 +2106,16 @@ mod tests {
     }
 
     /// Draws one frame in which `key` is pressed.
+    /// One frame with these pointer events.
+    fn pointer(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.frame(ctx));
+    }
+
     fn press(ctx: &egui::Context, app: &mut App, key: egui::Key) {
         let event = egui::Event::Key {
             key,
@@ -2295,6 +2423,25 @@ mod tests {
         let tokyo = c.find("trips/東京").unwrap().expect("made by the dialog");
         assert_eq!(c.entry(&photo).folder, Some(tokyo.clone()));
         assert_eq!(app.recent_folders[..2], [Some(tokyo), Some(day1)], "the latest first, after the earlier move");
+
+        // dragging: the ghost follows the pointer while images are held, and letting go over nothing drops nothing
+        egui::DragAndDrop::set_payload(&ctx, Drag(vec![photo.clone()]));
+        let middle = egui::pos2(700.0, 450.0);
+        pointer(&ctx, &mut app, vec![egui::Event::PointerMoved(middle)]);
+        assert!(egui::DragAndDrop::has_payload_of_type::<Drag>(&ctx), "held while the button is down");
+        pointer(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: middle,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(!egui::DragAndDrop::has_payload_of_type::<Drag>(&ctx));
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert_eq!(c.entry(&photo).folder, c.find("trips/東京").unwrap(), "still where it was");
 
         // deleting a folder with what is in it: its subfolders go, its images go to the trash, the view moves on
         let gone = app.model().catalog.find("旅行").unwrap().unwrap();
