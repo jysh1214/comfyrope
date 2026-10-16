@@ -251,6 +251,11 @@ impl App {
             {
                 actions.push(Action::ToggleFavorite(vec![v.id.clone()]));
             }
+            if k(egui::Key::M)
+                && let Some(v) = &self.viewer
+            {
+                actions.push(Action::Dialog(Dialog::move_to(vec![v.id.clone()])));
+            }
             // Backspace too: what an Apple keyboard labels delete sends Backspace
             if k(egui::Key::Delete) || k(egui::Key::Backspace) {
                 if self.view == View::Trash {

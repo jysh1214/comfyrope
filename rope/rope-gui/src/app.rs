@@ -41,13 +41,44 @@ struct Detail {
 type Deferred = Box<dyn FnOnce(&mut App) -> anyhow::Result<()>>;
 
 enum Dialog {
-    NewFolder { parent: Option<String>, name: String },
-    RenameFolder { id: String, name: String },
-    DeleteFolder { id: String },
-    Purge { ids: Vec<String> },
-    Tag { ids: Vec<String>, name: String },
-    DeletePrompt { id: String },
+    NewFolder {
+        parent: Option<String>,
+        name: String,
+    },
+    RenameFolder {
+        id: String,
+        name: String,
+    },
+    DeleteFolder {
+        id: String,
+    },
+    Purge {
+        ids: Vec<String>,
+    },
+    Tag {
+        ids: Vec<String>,
+        name: String,
+    },
+    DeletePrompt {
+        id: String,
+    },
+    /// Moving images to a folder: a search over every folder's path, the recent targets first; `pick` is the
+    /// choice the arrow keys are on.
+    MoveTo {
+        ids: Vec<String>,
+        search: String,
+        pick: usize,
+    },
 }
+
+impl Dialog {
+    fn move_to(ids: Vec<String>) -> Dialog {
+        Dialog::MoveTo { ids, search: String::new(), pick: 0 }
+    }
+}
+
+/// How many of the folders images were moved to lately the Move to dialog lists first.
+const RECENT_FOLDERS: usize = 5;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pick {
@@ -136,6 +167,8 @@ pub struct App {
     tasks: Vec<Receiver<Result<String, String>>>,
     scroll_to: Option<String>,
     open_on_load: Option<String>,
+    /// Where images were moved to lately, the latest first; None is unfiled. The Move to dialog lists them first.
+    recent_folders: Vec<Option<String>>,
     /// Looking at one image as large as the window allows.
     viewer: Option<viewer::Viewer>,
     /// The prompt open in the editor of the Prompts page.
@@ -189,6 +222,7 @@ impl App {
             tasks: Vec::new(),
             scroll_to: None,
             open_on_load: open,
+            recent_folders: Vec::new(),
             viewer: None,
             prompt: None,
             prompt_drag: None,
@@ -413,6 +447,9 @@ impl App {
                     Ok(())
                 })?;
                 self.refresh();
+                self.recent_folders.retain(|f| *f != folder);
+                self.recent_folders.insert(0, folder.clone());
+                self.recent_folders.truncate(RECENT_FOLDERS);
                 let place = folder.map(|f| self.model().catalog.folder_path(&f)).unwrap_or_else(|| "unfiled".into());
                 self.say(format!("moved {} image(s) to {place}", ids.len()), false);
             }
@@ -921,18 +958,10 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Move to", |ui| {
-                if ui.button("/ (unfiled)").clicked() {
-                    actions.push(Action::MoveTo(targets.clone(), None));
-                    ui.close();
-                }
-                for (path, fid) in &model.paths {
-                    if ui.button(path).clicked() {
-                        actions.push(Action::MoveTo(targets.clone(), Some(fid.clone())));
-                        ui.close();
-                    }
-                }
-            });
+            if ui.button("Move to…").clicked() {
+                actions.push(Action::Dialog(Dialog::move_to(targets.clone())));
+                ui.close();
+            }
             if ui.button("Add tag…").clicked() {
                 actions.push(Action::Dialog(Dialog::Tag { ids: targets.clone(), name: String::new() }));
                 ui.close();
@@ -1078,23 +1107,10 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label("Folder");
-            let current = entry.folder.clone();
-            let shown = current.as_ref().map(|f| catalog.folder_path(f)).unwrap_or_else(|| "/ (unfiled)".into());
-            egui::ComboBox::from_id_salt("folder").selected_text(shown).width(ui.available_width() - 8.0).show_ui(
-                ui,
-                |ui| {
-                    if ui.selectable_label(current.is_none(), "/ (unfiled)").clicked() && current.is_some() {
-                        actions.push(Action::MoveTo(vec![id.clone()], None));
-                    }
-                    for (path, fid) in self.model.as_ref().expect("loaded").paths.clone() {
-                        if ui.selectable_label(current.as_deref() == Some(fid.as_str()), path).clicked()
-                            && current.as_deref() != Some(fid.as_str())
-                        {
-                            actions.push(Action::MoveTo(vec![id.clone()], Some(fid)));
-                        }
-                    }
-                },
-            );
+            let shown = entry.folder.as_ref().map(|f| catalog.folder_path(f)).unwrap_or_else(|| "/ (unfiled)".into());
+            if ui.add(egui::Button::new(shown).truncate()).on_hover_text("move to another folder (M)").clicked() {
+                actions.push(Action::Dialog(Dialog::move_to(vec![id.clone()])));
+            }
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -1263,19 +1279,9 @@ impl App {
         ui.heading(format!("{} images selected", ids.len()));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label("Move to");
-            egui::ComboBox::from_id_salt("bulk-folder").selected_text("choose a folder").show_ui(ui, |ui| {
-                if ui.selectable_label(false, "/ (unfiled)").clicked() {
-                    actions.push(Action::MoveTo(ids.clone(), None));
-                }
-                for (path, fid) in self.model().paths.clone() {
-                    if ui.selectable_label(false, path).clicked() {
-                        actions.push(Action::MoveTo(ids.clone(), Some(fid)));
-                    }
-                }
-            });
-        });
-        ui.horizontal(|ui| {
+            if ui.button("Move to…").on_hover_text("choose a folder (M)").clicked() {
+                actions.push(Action::Dialog(Dialog::move_to(ids.clone())));
+            }
             if ui.button("Add tag…").clicked() {
                 actions.push(Action::Dialog(Dialog::Tag { ids: ids.clone(), name: String::new() }));
             }
@@ -1298,6 +1304,7 @@ impl App {
         let mut run: Option<Deferred> = None;
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let (up, down) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown)));
         let model = self.model.as_ref().expect("loaded");
         egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
             ui.set_width(380.0);
@@ -1359,6 +1366,60 @@ impl App {
                     if buttons(ui, "Delete", enter, &mut done) {
                         let id = id.clone();
                         run = Some(Box::new(move |app| app.delete_folder(&id)));
+                    }
+                }
+                Dialog::MoveTo { ids, search, pick } => {
+                    ui.heading(format!("Move {} image(s) to", ids.len()));
+                    let typed = ui
+                        .add(egui::TextEdit::singleline(search).hint_text("part of a folder's path").desired_width(f32::INFINITY));
+                    typed.request_focus();
+                    let (choices, recent) = folder_choices(&model.paths, &self.recent_folders, search);
+                    if typed.changed() {
+                        *pick = 0;
+                    }
+                    if !choices.is_empty() {
+                        *pick = (*pick + usize::from(down)).saturating_sub(usize::from(up)).min(choices.len() - 1);
+                    }
+                    let mut chosen: Option<Option<String>> = None; // the target picked; Some(None) is unfiled
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for (i, (text, target)) in choices.iter().enumerate() {
+                            if i == recent && recent > 0 {
+                                ui.separator();
+                            }
+                            let row = ui.selectable_label(i == *pick, text.as_str());
+                            if i == *pick && (up || down) {
+                                row.scroll_to_me(None);
+                            }
+                            if row.clicked() {
+                                chosen = Some(target.clone());
+                            }
+                        }
+                        if choices.is_empty() {
+                            ui.label(RichText::new("no folder matches").weak());
+                        }
+                    });
+                    let path = search.trim().to_owned();
+                    let mut make: Option<String> = None;
+                    if !path.is_empty() && model.catalog.find(&path).is_none() {
+                        let hint = "makes the folder, and the ones on the way to it, then moves the image(s) there";
+                        if ui.button(format!("Create {path} and move there")).on_hover_text(hint).clicked()
+                            || (enter && choices.is_empty())
+                        {
+                            make = Some(path);
+                        }
+                    }
+                    if buttons(ui, "Move", enter && !choices.is_empty(), &mut done) && !choices.is_empty() {
+                        chosen = Some(choices[*pick].1.clone());
+                    }
+                    let ids = ids.clone();
+                    if let Some(target) = chosen {
+                        run = Some(Box::new(move |app| app.try_apply(Action::MoveTo(ids, target), None)));
+                    } else if let Some(path) = make {
+                        run = Some(Box::new(move |app| {
+                            app.new_folder(&path)?;
+                            let target = app.model().catalog.find(&path).flatten();
+                            app.try_apply(Action::MoveTo(ids, target), None)
+                        }));
                     }
                 }
                 Dialog::Tag { ids, name } => {
@@ -1492,6 +1553,9 @@ impl App {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::L)) && !self.selected.is_empty() {
             actions.push(Action::ToggleFavorite(self.selected.clone()));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::M)) && !self.selected.is_empty() {
+            actions.push(Action::Dialog(Dialog::move_to(self.selected.clone())));
         }
         let look = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
         if look && let Some(id) = self.selected.last() {
@@ -1698,6 +1762,57 @@ fn star_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
 }
 
 /// OK and Cancel; returns whether OK was pressed (or `enter_ok`). Cancel sets `done`.
+/// What the Move to dialog lists for `search`, as (text, target), the target None for unfiled, and how many of
+/// the entries are the recent targets, which come first. With nothing typed: `recent` (those that still exist),
+/// then unfiled and every folder by path, each once. With text: the folders whose path has it, case-insensitively,
+/// those whose own name starts with it first, then those with a part on the way starting with it, then the rest,
+/// each group by path; unfiled when "/ (unfiled)" has it.
+fn folder_choices(
+    paths: &[(String, String)],
+    recent: &[Option<String>],
+    search: &str,
+) -> (Vec<(String, Option<String>)>, usize) {
+    const UNFILED: &str = "/ (unfiled)";
+    let needle = search.trim().to_lowercase();
+    if needle.is_empty() {
+        let mut out: Vec<(String, Option<String>)> = recent
+            .iter()
+            .filter_map(|r| match r {
+                None => Some((UNFILED.to_owned(), None)),
+                Some(id) => paths.iter().find(|(_, fid)| fid == id).map(|(p, fid)| (p.clone(), Some(fid.clone()))),
+            })
+            .collect();
+        let n = out.len();
+        if !recent.contains(&None) {
+            out.push((UNFILED.to_owned(), None));
+        }
+        let fresh = |fid: &String| !recent.iter().any(|r| r.as_deref() == Some(fid.as_str()));
+        out.extend(paths.iter().filter(|(_, fid)| fresh(fid)).map(|(p, fid)| (p.clone(), Some(fid.clone()))));
+        return (out, n);
+    }
+    let rank = |path: &str| {
+        let lower = path.to_lowercase();
+        if !lower.contains(&needle) {
+            return None;
+        }
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
+        Some(if name.starts_with(&needle) {
+            0
+        } else if lower.split('/').any(|part| part.starts_with(&needle)) {
+            1
+        } else {
+            2
+        })
+    };
+    let mut ranked: Vec<(u8, String, Option<String>)> =
+        paths.iter().filter_map(|(p, fid)| rank(p).map(|r| (r, p.clone(), Some(fid.clone())))).collect();
+    if UNFILED.contains(&needle) {
+        ranked.push((if "unfiled".starts_with(&needle) { 1 } else { 2 }, UNFILED.to_owned(), None));
+    }
+    ranked.sort_by_key(|r| r.0); // stable: each group keeps the order of `paths`, which is by path
+    (ranked.into_iter().map(|(_, p, t)| (p, t)).collect(), 0)
+}
+
 fn buttons(ui: &mut egui::Ui, ok: &str, enter_ok: bool, done: &mut bool) -> bool {
     let mut pressed = enter_ok;
     ui.add_space(8.0);
@@ -1752,6 +1867,27 @@ mod tests {
         let path = dir.join(name);
         image::RgbImage::from_fn(300, 200, |x, y| image::Rgb([seed, x as u8, y as u8])).save(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn the_move_to_dialog_lists_recent_targets_first_and_ranks_matches_by_name() {
+        let paths: Vec<(String, String)> = [("a", "1"), ("a/b", "2"), ("trips", "3"), ("trips/京都", "4")]
+            .map(|(p, id)| (p.to_owned(), id.to_owned()))
+            .into();
+        let recent = vec![Some("4".to_owned()), None, Some("gone".to_owned())];
+        let text = |c: &(Vec<(String, Option<String>)>, usize)| c.0.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
+
+        let all = folder_choices(&paths, &recent, "");
+        assert_eq!(text(&all), ["trips/京都", "/ (unfiled)", "a", "a/b", "trips"]);
+        assert_eq!(all.1, 2, "two recent targets, the deleted folder dropped");
+        assert_eq!(all.0[1].1, None);
+        assert_eq!(text(&folder_choices(&paths, &[], "")), ["/ (unfiled)", "a", "a/b", "trips", "trips/京都"]);
+
+        assert_eq!(text(&folder_choices(&paths, &recent, "b")), ["a/b"]);
+        assert_eq!(text(&folder_choices(&paths, &recent, "TRI")), ["trips", "trips/京都"], "own name first");
+        assert_eq!(text(&folder_choices(&paths, &recent, "京")), ["trips/京都"]);
+        assert_eq!(text(&folder_choices(&paths, &recent, "unf")), ["/ (unfiled)"]);
+        assert!(folder_choices(&paths, &recent, "zzz").0.is_empty());
     }
 
     /// A clip's thumbnail is its poster frame, which ffmpeg made when it came in.
@@ -2098,6 +2234,7 @@ mod tests {
             Dialog::DeleteFolder { id: folder.clone() },
             Dialog::Tag { ids: vec![result.clone()], name: String::new() },
             Dialog::Purge { ids: vec![photo.clone()] },
+            Dialog::MoveTo { ids: vec![result.clone()], search: String::new(), pick: 0 },
         ] {
             app.dialog = Some(d);
             frames_until(&ctx, &mut app, |_| true);
@@ -2143,6 +2280,21 @@ mod tests {
         assert_eq!(c.find("trips/京都"), Some(Some(folder.clone())), "an existing folder is reused");
         assert!(app.new_folder("旅行/2026").unwrap_err().to_string().contains("exists"));
         assert!(app.new_folder(" / ").is_err());
+
+        // Move to…: part of a folder's path and Enter moves there; a path no folder has is made on the way; the
+        // targets are remembered, the latest first
+        app.dialog = Some(Dialog::MoveTo { ids: vec![photo.clone()], search: "day 1".into(), pick: 0 });
+        press(&ctx, &mut app, egui::Key::Enter);
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        let day1 = c.find("trips/京都/day 1").unwrap().unwrap();
+        assert_eq!(c.entry(&photo).folder, Some(day1.clone()));
+        assert!(app.dialog.is_none());
+        app.dialog = Some(Dialog::MoveTo { ids: vec![photo.clone()], search: "trips/東京".into(), pick: 0 });
+        press(&ctx, &mut app, egui::Key::Enter);
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        let tokyo = c.find("trips/東京").unwrap().expect("made by the dialog");
+        assert_eq!(c.entry(&photo).folder, Some(tokyo.clone()));
+        assert_eq!(app.recent_folders[..2], [Some(tokyo), Some(day1)], "the latest first, after the earlier move");
 
         // deleting a folder with what is in it: its subfolders go, its images go to the trash, the view moves on
         let gone = app.model().catalog.find("旅行").unwrap().unwrap();

@@ -142,12 +142,13 @@ The window runs on its own: the command returns at once, and closing the termina
 - A clip shows its first frame, with a play mark and its length in the bottom-left corner.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
+- **Move to…** (in that menu, on M, and as the Folder button on the right) opens a dialog over the folders: type part of a path and the list narrows to the folders that have it, the ones whose own name starts with it first; ↑ ↓ pick, Enter moves, or click one. With nothing typed, the folders moved to lately come first. A path no folder has yet is made on Enter, with the folders on the way to it.
 
 **Right**, the selected image:
 
 - A preview (click it for the large view), the favorite star, and the name, which you can edit; for a clip, its length, rate and codec.
 - Copy path, Copy repro, Copy command and Delete buttons.
-- Its folder, tags and note.
+- Its folder (click it to move the image), tags and note.
 - Made from: its upstream images, in the order of the prompt's 圖1, 圖2; click one to go to it. Made from this: how many images were made from this one; Show lists them in the grid, as Made from 〈name〉 on the left until you choose another view.
 - The recipe, replays, and sources; a source that no longer exists is marked gone.
 
@@ -160,6 +161,7 @@ The window runs on its own: the command returns at once, and closing the termina
 | Arrow keys | Move the selection |
 | Enter, Space | View the selected image large |
 | L | Mark the selection as favorites, or unmark it when all of it is |
+| M | Move the selection to a folder: the Move to… dialog |
 | Ctrl+A | Select all |
 | Delete, Backspace | Move to the trash (in the trash: delete for good) |
 | Ctrl+C | Copy the path |
@@ -179,6 +181,7 @@ The window runs on its own: the command returns at once, and closing the termina
 | + − | Zoom in / out |
 | I | Show or hide the details panel |
 | L | Mark or unmark the image as a favorite; the order of stepping stays as it was when the view opened |
+| M | Move the image to a folder: the Move to… dialog |
 | Delete, Backspace | Move to the trash and go on to the next image (Undo in the status bar) |
 | Ctrl+C | Copy the path |
 | Esc | Back to the grid |
