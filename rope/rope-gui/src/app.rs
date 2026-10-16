@@ -619,6 +619,10 @@ impl App {
             ui.add_space(8.0);
             row(ui, View::All, format!("All  ({})", model.shown), actions);
             row(ui, View::Unfiled, format!("Unfiled  ({})", counts.get(&None).copied().unwrap_or(0)), actions);
+            if let View::MadeFrom(id) = &self.view {
+                // where the panel's Show button went; gone again once another view is chosen
+                row(ui, self.view.clone(), format!("{}  ({})", self.title(), model.made_from(id)), actions);
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Folders").strong());
@@ -1124,13 +1128,18 @@ impl App {
                 });
             }
         }
-        let children: Vec<String> = self.model.as_ref().expect("loaded").children(&id).to_vec();
-        if !children.is_empty() {
+        // a count and a button, not thumbnails: a photo may have hundreds of images made from it, and the grid is
+        // the place for hundreds
+        let made_from = self.model.as_ref().expect("loaded").made_from(&id);
+        if made_from > 0 {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("Made from this  ({})", children.len())).strong());
-            ui.horizontal_wrapped(|ui| {
-                for c in &children {
-                    self.small_thumb(ui, c, actions);
+            let showing = self.view == View::MadeFrom(id.clone());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Made from this").strong());
+                ui.label(format!("{made_from} image(s)"));
+                let show = ui.add_enabled(!showing, egui::Button::new("Show").small());
+                if show.on_hover_text("list them in the grid").clicked() {
+                    actions.push(Action::View(View::MadeFrom(id.clone())));
                 }
             });
         }
@@ -1478,6 +1487,9 @@ impl App {
             View::Folder(f) => model.catalog.folder_path(f),
             View::Tag(t) => format!("#{t}"),
             View::Trash => "Trash".into(),
+            View::MadeFrom(id) => {
+                format!("Made from {}", model.items.get(id).map_or_else(|| short(id).to_owned(), |i| i.name.clone()))
+            }
             View::Prompts => "Prompts".into(),
         }
     }
@@ -1957,8 +1969,17 @@ mod tests {
         assert_eq!(app.view, View::Folder(folder.clone()));
         frames_until(&ctx, &mut app, |a| a.visible == [photo.clone()]);
 
+        // downstream: the panel counts the images made from the photo, and Show lists them in the grid
+        assert_eq!(app.model().made_from(&photo), 1);
+        app.apply(Action::View(View::MadeFrom(photo.clone())), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.visible == [result.clone()]);
+        assert_eq!(app.title(), "Made from photo");
+
         // every view draws
-        for v in [View::All, View::Tag("海邊".into()), View::Trash, View::Unfiled, View::Folder(folder.clone())] {
+        let made_from = View::MadeFrom(photo.clone());
+        for v in
+            [View::All, View::Tag("海邊".into()), View::Trash, View::Unfiled, View::Folder(folder.clone()), made_from]
+        {
             app.apply(Action::View(v), Some(&ctx));
             frames_until(&ctx, &mut app, |_| true);
         }

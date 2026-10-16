@@ -166,7 +166,8 @@ enum Cmd {
     /// Everything about an image
     Show {
         id: String,
-        /// With --json: also list the images made from it (reads every meta.json)
+        /// List the images made from it; otherwise the text only counts them, and --json leaves them out (listing
+        /// reads every meta.json)
         #[arg(long)]
         downstream: bool,
     },
@@ -836,9 +837,13 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
         println!("  {label:<8} {}: {id} {name}", v["slot"]);
     }
     if let Some(children) = &children {
-        for (i, c) in children.iter().enumerate() {
-            let name = store::load(lib, c).map(|m| m.name).unwrap_or_default();
-            println!("  {:<8} {} {name}", if i == 0 { "down" } else { "" }, short(c));
+        if downstream {
+            for (i, c) in children.iter().enumerate() {
+                let name = store::load(lib, c).map(|m| m.name).unwrap_or_default();
+                println!("  {:<8} {} {name}", if i == 0 { "down" } else { "" }, short(c));
+            }
+        } else if !children.is_empty() {
+            println!("  down     {} image(s) made from it; --downstream lists them", children.len());
         }
     }
     for r in &meta.replays {

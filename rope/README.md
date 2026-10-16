@@ -102,7 +102,7 @@ An image's id is the SHA-256 of its file:
 | `rope import --tree DIR... [--into F]` | Make each disk folder a rope folder of the same name, with its subfolders, in F or at the top |
 | `rope ls [F] [-r] [-l] [--tag T] [--fav] [--trash]` | List a folder; without F, the unfiled images. Favorites are marked ★ |
 | `rope tree` | The folder tree with image counts, and every tag |
-| `rope show ID` | Everything about an image: path, sources, recipe, upstream and downstream, note |
+| `rope show ID [--downstream]` | Everything about an image: path, sources, recipe, upstream, how many images were made from it (`--downstream` lists them), note |
 | `rope path ID` | The absolute path of the image's file in the library |
 | `rope name ID TEXT` | Change the display name; the file is not touched |
 | `rope note ID [--set T \| --append T \| -e]` | Print or change the note; `-e` edits it in `$EDITOR` |
@@ -145,7 +145,7 @@ The window runs on its own: the command returns at once, and closing the termina
 - A preview (click it for the large view), the favorite star, and the name, which you can edit.
 - Copy path, Copy repro, Copy command and Delete buttons.
 - Its folder, tags and note.
-- Made from: its upstream images, in the order of the prompt's 圖1, 圖2. Made from this: its downstream images. Click a thumbnail to go to that image.
+- Made from: its upstream images, in the order of the prompt's 圖1, 圖2; click one to go to it. Made from this: how many images were made from this one; Show lists them in the grid, as Made from 〈name〉 on the left until you choose another view.
 - The recipe, replays, and sources; a source that no longer exists is marked gone.
 
 **Prompts**, chosen on the left: prompts worth keeping, each with a title. The list is in the middle; click one to edit it on the right, where Save writes it, Copy puts its text on the clipboard and Delete… removes it. New prompt adds one at once, titled Draft (then Draft 2, …) with no text yet, and puts the cursor in the text, to paste into now or later; Save prompt under an image's recipe adds that image's prompt under the image's name. Drag a card up or down to put it elsewhere in the list. The search box filters them. On this page Delete, Ctrl+C and Esc act on the prompt being edited. `rope prompt` reaches the same list from the terminal.

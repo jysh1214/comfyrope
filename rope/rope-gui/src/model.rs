@@ -16,6 +16,8 @@ pub enum View {
     Folder(String),
     Tag(String),
     Trash,
+    /// The images made from one image: its children, the trash aside.
+    MadeFrom(String),
     /// The Prompts page: not images at all.
     Prompts,
 }
@@ -152,6 +154,11 @@ impl Model {
         self.children.get(id).map_or(&[], Vec::as_slice)
     }
 
+    /// How many images were made from `id`, the trash aside: what View::MadeFrom shows.
+    pub fn made_from(&self, id: &str) -> usize {
+        self.children(id).iter().filter(|c| self.items.get(*c).is_some_and(|i| self.shown(i))).count()
+    }
+
     fn shown(&self, item: &Item) -> bool {
         !item.kept && !self.catalog.is_trashed(&item.id)
     }
@@ -171,6 +178,7 @@ impl Model {
                     View::Folder(id) => self.shown(i) && e.is_some_and(|e| e.folder.as_ref() == Some(id)),
                     View::Tag(t) => self.shown(i) && e.is_some_and(|e| e.tags.contains(t)),
                     View::Trash => !i.kept && self.catalog.is_trashed(&i.id),
+                    View::MadeFrom(id) => self.shown(i) && i.upstream.contains(id),
                     View::Prompts => false,
                 };
                 in_view && (search.is_empty() || i.haystack.contains(&search))
@@ -246,6 +254,31 @@ mod tests {
         }
         let want: Vec<String> = [2, 0, 3, 1].iter().map(|&i| ids[i].clone()).collect();
         assert_eq!(model.view(&View::All, ""), want);
+    }
+
+    #[test]
+    fn made_from_lists_the_images_made_from_one_outside_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let add = |name: &str, seed: u8, input: Option<&str>| {
+            let path = dir.path().join(name);
+            image::RgbImage::from_pixel(4, 4, image::Rgb([seed, 0, 0])).save(&path).unwrap();
+            let made = input.map(|i| serde_json::json!({"flags": [], "prompt": "p", "inputs": [{"id": i}]}));
+            let via = if made.is_some() { "img2img.py" } else { "import" };
+            store::add(&lib, &path, &NewImage { via: via.into(), made, ..Default::default() }).unwrap().sha
+        };
+        let photo = add("photo.png", 1, None);
+        let good = add("good.png", 2, Some(&photo));
+        let bad = add("bad.png", 3, Some(&photo));
+        let other = add("other.png", 4, None);
+        let now = rope_core::time::now();
+        store::edit_catalog(&lib, "rm", std::slice::from_ref(&bad), |c| Ok(c.trash(&bad, &now))).unwrap();
+        let model = Model::load(&lib).unwrap();
+        assert_eq!(model.view(&View::MadeFrom(photo.clone()), ""), [good]);
+        assert_eq!(model.made_from(&photo), 1);
+        assert_eq!(model.children(&photo).len(), 2, "the lineage itself keeps the trashed one");
+        assert_eq!(model.made_from(&other), 0);
+        assert!(model.view(&View::MadeFrom(other), "").is_empty());
     }
 
     /// cargo test --release -p rope-gui -- --ignored, with ROPE_BENCH_LIBRARY naming a large library.
