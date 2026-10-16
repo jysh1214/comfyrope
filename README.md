@@ -34,6 +34,7 @@ rope/target/release/rope-gui                            # browse the results
 ├── download_models.py   # downloads models from Hugging Face (run with uv, nothing to install first)
 ├── run_comfyui.sh       # starts ComfyUI (written by install_comfyui.py)
 ├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
+├── comfycore.py         # what img2img.py is built on: the ComfyUI client, rope, the inputs, running jobs; knows no model
 ├── run.py               # template for a batch of settings to compare, on img2img.py's Python API
 ├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
@@ -254,6 +255,8 @@ Give it images and a prompt and it makes a new image, with no UI. It flattens Co
 ```
 
 With `.venv` activated, `python img2img.py` works the same as `./img2img.py`. To try many settings in one go, [import it from Python](#from-python).
+
+`img2img.py` holds only what is about its models: the requests, the workflows and the replay. The ComfyUI client, rope, the input conversion and the running of jobs are `comfycore.py` beside it, which knows no model, so another tool can be built on it the same way. `img2img.py` needs it next to itself.
 
 Images come first and the prompt last; the first image sets the output size. With several images, refer to them in the prompt as 圖1, 圖2 or image 1, image 2, in command-line order. Prompts can be Chinese or English and work best as instructions that describe only the change: "replace … with …", "remove …", "add …".
 
