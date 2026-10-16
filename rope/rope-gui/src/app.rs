@@ -49,8 +49,9 @@ enum Dialog {
         id: String,
         name: String,
     },
-    DeleteFolder {
-        id: String,
+    /// Deleting folders with everything in them: one, or the ones picked with Ctrl-click.
+    DeleteFolders {
+        ids: Vec<String>,
     },
     Purge {
         ids: Vec<String>,
@@ -104,6 +105,8 @@ enum Action {
     MoveTo(Vec<String>, Option<String>),
     /// Images are being dragged over this closed folder: open it once they have stayed a moment.
     DragOver(String),
+    /// Ctrl-click on a folder: into the pick, or out of it again.
+    PickFolder(String),
     AddTag(Vec<String>, String),
     RemoveTag(Vec<String>, String),
     Dialog(Dialog),
@@ -179,6 +182,8 @@ pub struct App {
     recent_folders: Vec<Option<String>>,
     /// The closed folder dragged images are over, and since when.
     drag_over: Option<(String, Instant)>,
+    /// Folders picked with Ctrl-click, to delete together; a plain click or Esc lets them go.
+    picked_folders: Vec<String>,
     /// Looking at one image as large as the window allows.
     viewer: Option<viewer::Viewer>,
     /// The prompt open in the editor of the Prompts page.
@@ -234,6 +239,7 @@ impl App {
             open_on_load: open,
             recent_folders: Vec::new(),
             drag_over: None,
+            picked_folders: Vec::new(),
             viewer: None,
             prompt: None,
             prompt_drag: None,
@@ -371,6 +377,7 @@ impl App {
     fn try_apply(&mut self, action: Action, ctx: Option<&egui::Context>) -> anyhow::Result<()> {
         match action {
             Action::View(v) => {
+                self.picked_folders.clear();
                 if v != self.view {
                     self.view = v;
                     self.selected.clear();
@@ -387,6 +394,7 @@ impl App {
             }
             Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
             Action::Select(id, pick) => {
+                self.picked_folders.clear();
                 match pick {
                     Pick::One => self.selected = vec![id.clone()],
                     Pick::Toggle => {
@@ -449,6 +457,17 @@ impl App {
                 })?;
                 self.refresh();
                 self.say(format!("restored {n} image(s)"), false);
+            }
+            Action::PickFolder(id) => {
+                match self.picked_folders.iter().position(|p| *p == id) {
+                    Some(i) => {
+                        self.picked_folders.remove(i);
+                    }
+                    None => self.picked_folders.push(id),
+                }
+                // folders are being worked on now, not images
+                self.selected.clear();
+                self.anchor = None;
             }
             Action::DragOver(id) => {
                 let since = match self.drag_over.take() {
@@ -782,17 +801,31 @@ impl App {
         rope_core::catalog::shell_word(&self.model().catalog.folder_path(id))
     }
 
-    /// Deletes a folder with everything in it: its subfolders go, its images go to the trash.
-    fn delete_folder(&mut self, id: &str) -> anyhow::Result<()> {
-        let path = self.model().catalog.folder_path(id);
-        let gone = self.model().catalog.subtree(id);
-        let (folders, trashed) = store::remove_folder_tree(&self.lib, &path)?;
-        if matches!(&self.view, View::Folder(f) if gone.contains(f)) {
-            self.view = View::All;
+    /// Deletes folders with everything in them: their subfolders go, their images go to the trash. A folder
+    /// inside another of them goes with it. The pick is let go, and the view moves on if it was in one of them.
+    fn delete_folders(&mut self, ids: &[String]) -> anyhow::Result<()> {
+        let (mut folders, mut trashed) = (0, 0);
+        let mut result = Ok(());
+        for id in top_level(&self.model().catalog, ids) {
+            let path = self.model().catalog.folder_path(&id);
+            let gone = self.model().catalog.subtree(&id);
+            match store::remove_folder_tree(&self.lib, &path) {
+                Ok((f, t)) => (folders, trashed) = (folders + f, trashed + t.len()),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+            if matches!(&self.view, View::Folder(f) if gone.contains(f)) {
+                self.view = View::All;
+            }
         }
+        self.picked_folders.clear();
         self.refresh();
-        self.say(format!("deleted {folders} folder(s); moved {} image(s) to the trash", trashed.len()), false);
-        Ok(())
+        if folders > 0 {
+            self.say(format!("deleted {folders} folder(s); moved {trashed} image(s) to the trash"), false);
+        }
+        result
     }
 
     /// Every image in the trash.
@@ -815,7 +848,17 @@ impl App {
         for (id, folder) in model.catalog.children(parent) {
             let n = counts.get(&Some(id.to_owned())).copied().unwrap_or(0);
             let text = format!("{}  ({n})", folder.name);
-            let selected = self.view == View::Folder(id.to_owned());
+            let picked = self.picked_folders.iter().any(|p| p == id);
+            let selected = picked || self.view == View::Folder(id.to_owned());
+            // a click shows the folder; with Ctrl it goes into the pick, or out of it
+            let click = |ui: &egui::Ui, actions: &mut Vec<Action>| {
+                let ctrl = ui.input(|i| i.modifiers.command);
+                actions.push(if ctrl {
+                    Action::PickFolder(id.to_owned())
+                } else {
+                    Action::View(View::Folder(id.to_owned()))
+                });
+            };
             let menu = |resp: &egui::Response, actions: &mut Vec<Action>| {
                 resp.context_menu(|ui| {
                     if ui.button("Copy path").on_hover_text("for --into and rope commands").clicked() {
@@ -836,8 +879,16 @@ impl App {
                         }));
                         ui.close();
                     }
-                    if ui.button("Delete…").clicked() {
-                        actions.push(Action::Dialog(Dialog::DeleteFolder { id: id.to_owned() }));
+                    // on one of several picked folders, the deletion is of them all
+                    let ids = if picked && self.picked_folders.len() > 1 {
+                        self.picked_folders.clone()
+                    } else {
+                        vec![id.to_owned()]
+                    };
+                    let label =
+                        if ids.len() > 1 { format!("Delete {} folders…", ids.len()) } else { "Delete…".into() };
+                    if ui.button(label).clicked() {
+                        actions.push(Action::Dialog(Dialog::DeleteFolders { ids }));
                         ui.close();
                     }
                 });
@@ -847,7 +898,7 @@ impl App {
                     ui.add_space(ui.spacing().indent);
                     let resp = sidebar_row(ui, selected, text);
                     if resp.clicked() {
-                        actions.push(Action::View(View::Folder(id.to_owned())));
+                        click(ui, actions);
                     }
                     if let Some(ids) = drop_on(ui, &resp) {
                         actions.push(Action::MoveTo(ids, Some(id.to_owned())));
@@ -866,7 +917,7 @@ impl App {
                     .show_header(ui, |ui| {
                         let resp = sidebar_row(ui, selected, text);
                         if resp.clicked() {
-                            actions.push(Action::View(View::Folder(id.to_owned())));
+                            click(ui, actions);
                         }
                         if let Some(ids) = drop_on(ui, &resp) {
                             actions.push(Action::MoveTo(ids, Some(id.to_owned())));
@@ -1449,24 +1500,44 @@ impl App {
                         run = Some(Box::new(move |app| app.delete_prompt(&id)));
                     }
                 }
-                Dialog::DeleteFolder { id } => {
-                    let path = model.catalog.folder_path(id);
-                    let (folders, images) = model.catalog.tree_size(id);
-                    ui.heading("Delete folder");
-                    let below = match folders - 1 {
-                        0 => String::new(),
-                        n => format!(" and the {n} folder(s) inside it"),
-                    };
-                    ui.label(format!("Delete the folder {path}{below}?"));
+                Dialog::DeleteFolders { ids } => {
+                    let tops = top_level(&model.catalog, ids);
+                    let (mut folders, mut images) = (0, 0);
+                    for id in &tops {
+                        let (f, i) = model.catalog.tree_size(id);
+                        (folders, images) = (folders + f, images + i);
+                    }
+                    let inside = folders - tops.len();
+                    if let [id] = tops.as_slice() {
+                        ui.heading("Delete folder");
+                        let below = match inside {
+                            0 => String::new(),
+                            n => format!(" and the {n} folder(s) inside it"),
+                        };
+                        ui.label(format!("Delete the folder {}{below}?", model.catalog.folder_path(id)));
+                    } else {
+                        ui.heading("Delete folders");
+                        let below = match inside {
+                            0 => String::new(),
+                            n => format!(", and the {n} folder(s) inside them"),
+                        };
+                        ui.label(format!("Delete these {} folders{below}?", tops.len()));
+                        for id in tops.iter().take(8) {
+                            ui.label(RichText::new(model.catalog.folder_path(id)).weak());
+                        }
+                        if tops.len() > 8 {
+                            ui.label(RichText::new(format!("… and {} more", tops.len() - 8)).weak());
+                        }
+                    }
                     if images > 0 {
+                        let whose = if tops.len() == 1 { "Its" } else { "Their" };
                         ui.label(format!(
-                            "Its {images} image(s) move to the trash. Restored from there, they come back unfiled; \
-                             emptying the trash deletes them for good."
+                            "{whose} {images} image(s) move to the trash. Restored from there, they come back \
+                             unfiled; emptying the trash deletes them for good."
                         ));
                     }
                     if buttons(ui, "Delete", enter, &mut done) {
-                        let id = id.clone();
-                        run = Some(Box::new(move |app| app.delete_folder(&id)));
+                        run = Some(Box::new(move |app| app.delete_folders(&tops)));
                     }
                 }
                 Dialog::MoveTo { ids, search, pick } => {
@@ -1635,7 +1706,9 @@ impl App {
                 dir,
             )
         });
-        if del && !self.selected.is_empty() {
+        if del && !self.picked_folders.is_empty() {
+            actions.push(Action::Dialog(Dialog::DeleteFolders { ids: self.picked_folders.clone() }));
+        } else if del && !self.selected.is_empty() {
             let ids = self.selected.clone();
             actions.push(if self.view == View::Trash {
                 Action::Dialog(Dialog::Purge { ids })
@@ -1648,6 +1721,7 @@ impl App {
         }
         if esc {
             self.selected.clear();
+            self.picked_folders.clear();
         }
         if copy && let Some(id) = self.selected.last() {
             actions.push(Action::CopyPath(id.clone()));
@@ -1815,6 +1889,19 @@ impl App {
 /// A row of the sidebar: `text` on a selectable button that is cut with … where the panel is too narrow for it,
 /// so a long folder name never widens the panel (egui widens a panel to what is drawn in it). A cut row shows
 /// its whole text on hover.
+/// Of the folders `ids`, the ones not inside another of them, each once, in the order given: deleting a folder
+/// takes everything below it, so these are the ones to delete.
+fn top_level(catalog: &rope_core::Catalog, ids: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        let inside = ids.iter().any(|p| p != id && catalog.subtree(p).contains(id));
+        if !inside && !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
 /// Marks `resp` as where dragged images would land while they are over it, and returns them when they are
 /// dropped on it.
 fn drop_on(ui: &egui::Ui, resp: &egui::Response) -> Option<Vec<String>> {
@@ -2359,7 +2446,7 @@ mod tests {
         for d in [
             Dialog::NewFolder { parent: Some(folder.clone()), name: "x".into() },
             Dialog::RenameFolder { id: folder.clone(), name: "y".into() },
-            Dialog::DeleteFolder { id: folder.clone() },
+            Dialog::DeleteFolders { ids: vec![folder.clone()] },
             Dialog::Tag { ids: vec![result.clone()], name: String::new() },
             Dialog::Purge { ids: vec![photo.clone()] },
             Dialog::MoveTo { ids: vec![result.clone()], search: String::new(), pick: 0 },
@@ -2458,13 +2545,39 @@ mod tests {
         .sha;
         app.refresh();
         app.apply(Action::View(View::Folder(app.model().catalog.find("旅行/2026").unwrap().unwrap())), Some(&ctx));
-        app.delete_folder(&gone).unwrap();
+        app.delete_folders(std::slice::from_ref(&gone)).unwrap();
         let c = rope_core::Catalog::load(&lib).unwrap();
         assert!(c.find("旅行").is_none() && c.find("旅行/2026/春").is_none());
         assert!(c.is_trashed(&inside) && c.entry(&inside).folder.is_none());
         assert_eq!(app.view, View::All);
         app.apply(Action::Restore(vec![inside.clone()]), Some(&ctx));
         assert_eq!(rope_core::Catalog::load(&lib).unwrap().entry(&inside), Default::default(), "restored: unfiled");
+
+        // Ctrl-click picks folders; Delete removes them together, a pick inside another pick going with it; a
+        // plain click on the sidebar lets the pick go
+        app.new_folder("x/y").unwrap();
+        app.new_folder("z").unwrap();
+        let fid = |app: &App, path: &str| app.model().catalog.find(path).unwrap().unwrap();
+        let (x, y, z) = (fid(&app, "x"), fid(&app, "x/y"), fid(&app, "z"));
+        app.apply(Action::Select(photo.clone(), Pick::One), Some(&ctx));
+        for id in [&x, &y, &z] {
+            app.apply(Action::PickFolder(id.clone()), Some(&ctx));
+        }
+        assert_eq!(app.picked_folders, vec![x.clone(), y.clone(), z.clone()]);
+        assert!(app.selected.is_empty(), "picking folders puts the images down");
+        assert_eq!(top_level(&app.model().catalog, &app.picked_folders), vec![x.clone(), z.clone()]);
+        app.apply(Action::PickFolder(y.clone()), Some(&ctx));
+        assert_eq!(app.picked_folders, vec![x.clone(), z.clone()], "picked again: out");
+        app.apply(Action::View(View::All), Some(&ctx));
+        assert!(app.picked_folders.is_empty());
+        app.apply(Action::PickFolder(x.clone()), Some(&ctx));
+        app.apply(Action::PickFolder(z.clone()), Some(&ctx));
+        press(&ctx, &mut app, egui::Key::Delete);
+        assert!(matches!(app.dialog, Some(Dialog::DeleteFolders { .. })), "Delete asks about the pick");
+        press(&ctx, &mut app, egui::Key::Enter);
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert!(c.find("x").is_none() && c.find("x/y").is_none() && c.find("z").is_none());
+        assert!(app.picked_folders.is_empty() && app.dialog.is_none());
 
         // a folder's Copy path gives what a command takes
         assert_eq!(app.folder_arg(&folder), "trips/京都");
@@ -2476,7 +2589,7 @@ mod tests {
         // several selected: the bulk panel draws
         app.apply(Action::SelectAll, Some(&ctx));
         frames_until(&ctx, &mut app, |_| true);
-        assert_eq!(app.selected.len(), 5);
+        assert_eq!(app.selected.len(), 6, "every image in All, the restored one among them");
 
         // the Prompts page: a prompt kept from an image's recipe is saved at once, so is a New prompt (a Draft
         // with no text), then one added by the CLI, an edit and a delete

@@ -133,6 +133,7 @@ The window runs on its own: the command returns at once, and closing the termina
 
 - Prompts, the page of prompts kept to use again (below); then All, Unfiled, and rope's own folder tree, with image counts.
 - Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it, or delete it with everything in it (its images move to the trash; it says how many first); `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
+- Ctrl-click folders to pick several; the pick shows as selected. Right-click one of them and choose Delete N folders…, or press Delete, to delete them all with everything in them; it says how many folders and images first. A plain click on the left, a click on an image, or Esc lets the pick go.
 - Below the tree: the tags, then the trash. Right-click the trash and choose Clean to empty it; it asks first, since that deletes for good.
 
 **Middle:**
@@ -164,9 +165,9 @@ The window runs on its own: the command returns at once, and closing the termina
 | L | Mark the selection as favorites, or unmark it when all of it is |
 | M | Move the selection to a folder: the Move to… dialog |
 | Ctrl+A | Select all |
-| Delete, Backspace | Move to the trash (in the trash: delete for good) |
+| Delete, Backspace | Move to the trash (in the trash: delete for good); with folders picked, delete those |
 | Ctrl+C | Copy the path |
-| Esc | Clear the selection |
+| Esc | Clear the selection, and the folder pick |
 | F5 | Reload |
 
 **The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and a bar under the clip has Play/Pause, a progress bar across the width, which also shows how much of the clip is decoded yet, and the position; click or drag the progress bar to go to a frame. Open externally hands a clip to the default video player.
