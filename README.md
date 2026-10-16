@@ -39,7 +39,8 @@ rope/target/release/rope-gui                            # browse the results
 ├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
 ├── img2vid.py           # start image + prompt -> short clip with Wan 2.2, the same way; the clips land in videos/
 ├── comfycore.py         # what both are built on: the ComfyUI client, rope, the inputs, running jobs; knows no model
-├── run.py               # template for a batch of settings to compare, on img2img.py's Python API
+├── run_img2img.py       # template for a batch of settings to compare, on img2img.py's Python API
+├── run_img2vid.py       # the same for clips, on img2vid.py's
 ├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
 ├── videos/              # img2vid.py's clips, each with its recipe, until rope keeps videos (not in git)
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
@@ -407,7 +408,7 @@ for r in img2img.run(requests):
     print(r.short, r.folder, r.request.lightning, r.request.lora, r.request.tags)
 ```
 
-`run.py` is this as a template: a `BASE` request, the settings to vary, and a `batch()` that yields the combinations, each in a rope folder named after it. Copy it, fill in the three numbered parts, and run it from the repo root with `.venv/bin/python run.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); `--list` prints the batch after checking every request, without making anything. From elsewhere, put the repo on `PYTHONPATH`.
+`run_img2img.py` is this as a template: a `BASE` request, the settings to vary, and a `batch()` that yields the combinations, each in a rope folder named after it. Copy it, fill in the three numbered parts, and run it from the repo root with `.venv/bin/python run_img2img.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); `--list` prints the batch after checking every request, without making anything. From elsewhere, put the repo on `PYTHONPATH`.
 
 | Name | What it is |
 |---|---|
@@ -451,7 +452,7 @@ Give it a start image and a prompt and it makes a short clip with Wan 2.2, the 1
 
 The clip keeps the start image's aspect ratio, scaled so that its long side is `--size` pixels (default 640; both sides are rounded to a multiple of 16), and lasts `--seconds` at `--fps` (default 5 s at Wan's own 16 fps: 81 frames). Prompts work best as a description of the motion: what moves, and how the camera moves.
 
-**Where clips go.** rope cannot keep videos yet, so each clip is written to `--out` (default `videos/` in the repo) as `<name>.mp4`, next to `<name>.made.json`, its recipe, and `<name>.graph.json`, the workflow ComfyUI ran: the files `rope add` takes, for when rope knows videos. The start image does go into rope, so the recipe names it by id. Names are `<time>_<image>_<model>_s<seed>`, as `img2img.py`'s. ComfyUI keeps its own copy of each clip under `ComfyUI/output/img2vid/`.
+**Where clips go.** rope cannot keep videos yet, so each clip is written to `--out` (default `videos/` in the repo), or to a folder under it with `--into FOLDER`, as `<name>.mp4`, next to `<name>.made.json`, its recipe, and `<name>.graph.json`, the workflow ComfyUI ran: the files `rope add` takes, for when rope knows videos. The start image does go into rope, so the recipe names it by id. Names are `<time>_<image>_<model>_s<seed>`, as `img2img.py`'s; a second clip of the same name in one folder (the same seed with other settings, say) gets `-2`, `-3`, … rather than overwrite the first. ComfyUI keeps its own copy of each clip under `ComfyUI/output/img2vid/`.
 
 **Speed.** On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step LoRAs (the first one longer, with 30 GB of models to load; `./run_comfyui.sh` in another pane keeps them loaded between runs) and about 9 minutes without.
 
@@ -468,9 +469,10 @@ The clip keeps the start image's aspect ratio, scaled so that its long side is `
 | `--lora FILE[:STRENGTH]` | An extra LoRA from `models/loras`, applied to both models; repeatable |
 | `--negative TEXT` | The negative prompt (default: Wan's own, in Chinese); has an effect only when cfg is above 1 |
 | `--out DIR` | Where the clips go (default `videos/`) |
+| `--into FOLDER` | A folder under `--out` for these clips, e.g. `trips/京都`; the rope folder once rope keeps videos |
 | `--library DIR`, the ComfyUI options | As `img2img.py`'s: the start image goes into the rope library, and ComfyUI is found or started the same way |
 
-From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, out=..., **comfy_options)` returns a `Result` per clip with `path`, `width`, `height` and `seconds`.
+From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, out=..., **comfy_options)` returns a `Result` per clip with `path`, `folder` (its `into`), `width`, `height` and `seconds`. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, LoRAs) and a `batch()`; each combination's clips go to a folder under `videos/` named after it, so `--list` and a run work the same way.
 
 **Not there yet.** A clip cannot be made again the way an image can (`--replay` is `img2img.py`'s); the recipe beside each clip is kept for when rope takes videos. Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
 

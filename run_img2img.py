@@ -1,8 +1,8 @@
 """A batch of img2img runs: the combinations of some settings, made in one go and kept in rope, to compare side by
 side. A template: copy it, fill in the three numbered parts, and run it from the repo root:
 
-    .venv/bin/python run.py --list    # only print the batch, after checking every request
-    .venv/bin/python run.py           # make them all, through one ComfyUI
+    .venv/bin/python run_img2img.py --list    # only print the batch, after checking every request
+    .venv/bin/python run_img2img.py           # make them all, through one ComfyUI
 
 Every result lands in a rope folder named after its combination, with its recipe. README.md, "From Python",
 describes Request, run() and Result."""

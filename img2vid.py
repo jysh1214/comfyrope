@@ -22,9 +22,9 @@ lasts --seconds at --fps (default 5 s at Wan's own 16 fps: 81 frames). The start
 reads its inputs (HEIC, RAW and the like are converted first). Prompts work best as a description of the
 motion: what moves, and how the camera moves.
 
-rope cannot keep videos yet, so each clip goes to --out (default videos/ in the repo) as <name>.mp4, next to
-<name>.made.json, its recipe, and <name>.graph.json, the workflow ComfyUI ran: the files rope add takes, for
-when it knows videos. The start image does go into rope, so the recipe names it by id. Names are
+rope cannot keep videos yet, so each clip goes to --out (default videos/ in the repo), or to a folder under it
+with --into, as <name>.mp4, next to <name>.made.json, its recipe, and <name>.graph.json, the workflow ComfyUI
+ran: the files rope add takes, for when it knows videos. The start image does go into rope, so the recipe names it by id. Names are
 <time>_<image>_<model>_s<seed>, as img2img.py's. ComfyUI keeps its own copy of each clip under
 ComfyUI/output/img2vid/. The ComfyUI and --library options are img2img.py's, and so is the Python side:
 import img2vid, build a Request per clip, and run() them in one go.
@@ -96,7 +96,7 @@ class Request:
     seconds: float | None = None  # default 5
     fps: int | None = None  # default 16, Wan's own rate; another value only changes the playback speed
     size: int | None = None  # the long side of the clip, in pixels; default 640
-    into: str | None = None  # the rope folder, once rope keeps videos; unused until then
+    into: str | None = None  # a folder under `out` for the clips, e.g. "trips/京都"; the rope folder once rope keeps videos
     tags: list[str] = field(default_factory=list)
     note: str | None = None
 
@@ -110,6 +110,8 @@ class Request:
         loras = [self.lora] if isinstance(self.lora, str) else list(self.lora)
         r.lora = [parse_lora(l) if isinstance(l, str) else (str(l[0]), float(l[1])) for l in loras]
         r.into = self.into or None
+        if r.into and (Path(r.into).is_absolute() or ".." in Path(r.into).parts):
+            raise ValueError("into is a folder under out: a relative path, without ..")
         r.note = self.note or None
         if len(r.images) != 1:
             raise ValueError("exactly one start image is needed")
@@ -219,19 +221,26 @@ def describe(r: Request, base: int) -> str:
 
 
 def keep_video(out: Path, run: Run, job: Job, data: bytes, text: str, suffix: str) -> str:
-    """Writes a clip to `out` with its recipe and the workflow, as a Result on its job, and says where it went.
-    A stopgap until rope keeps videos: the three files are what `rope add` takes."""
+    """Writes a clip to `out`, or to `out`/into with Request.into, with its recipe and the workflow, as a Result on
+    its job, and says where it went. A stopgap until rope keeps videos: the three files are what `rope add` takes.
+    A name already taken in that folder (the same image, model and seed in one run, with other settings) gets -2,
+    -3, ... rather than overwrite anything."""
     r = job.request
-    name = run_name(run.when, job.inputs.names[0], r.model, job.seed)
+    dest = out / r.into if r.into else out
+    dest.mkdir(parents=True, exist_ok=True)
+    base = name = run_name(run.when, job.inputs.names[0], r.model, job.seed)
+    n = 1
+    while (dest / f"{name}{suffix}").exists():
+        n += 1
+        name = f"{base}-{n}"
     made = recipe(run, job, video_flags(r, job.seed), text)
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / f"{name}{suffix}"
+    path = dest / f"{name}{suffix}"
     path.write_bytes(data)
-    (out / f"{name}.made.json").write_text(json.dumps(made, ensure_ascii=False, indent=1), "utf-8")
-    (out / f"{name}.graph.json").write_text(json.dumps(job.graph.nodes, ensure_ascii=False), "utf-8")
+    (dest / f"{name}.made.json").write_text(json.dumps(made, ensure_ascii=False, indent=1), "utf-8")
+    (dest / f"{name}.graph.json").write_text(json.dumps(job.graph.nodes, ensure_ascii=False), "utf-8")
     wan = next(n["inputs"] for n in job.graph.nodes.values() if n["class_type"] == "WanImageToVideo")
-    result = Result(r, job.index, job.seed, path=path, created=True, width=wan["width"], height=wan["height"],
-                    seconds=job.took)
+    result = Result(r, job.index, job.seed, path=path, folder=r.into, created=True, width=wan["width"],
+                    height=wan["height"], seconds=job.took)
     job.results.append(result)
     return tilde(path)
 
@@ -278,6 +287,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     g = p.add_argument_group("where the clips go")
     g.add_argument("--out", type=Path, default=OUT, metavar="DIR",
                    help=f"folder for the clips, their recipes and workflows (default {tilde(OUT)})")
+    g.add_argument("--into", metavar="FOLDER",
+                   help="a folder under --out for these clips, e.g. trips/京都; the rope folder once rope keeps videos")
     g.add_argument("--library", metavar="DIR", help="the rope library the start image goes into (default: $ROPE_LIBRARY, else ~/.local/share/rope)")
     g = p.add_argument_group("ComfyUI")
     add_comfy_args(g)
@@ -286,7 +297,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     try:
         a.request = Request([a.image], a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
                             steps=a.steps, cfg=a.cfg, shift=a.shift, lora=a.lora, lightning=a.lightning,
-                            seconds=a.seconds, fps=a.fps, size=a.size).settled()
+                            seconds=a.seconds, fps=a.fps, size=a.size, into=a.into).settled()
     except ValueError as e:
         p.error(str(e))
     a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)

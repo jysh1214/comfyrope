@@ -1106,10 +1106,12 @@ def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options,
         return []
     check_packages(tool.packages, tool.file)
     lib = Library.find(opts.library)
-    for into in dict.fromkeys(r.into for r in settled if r.into):
-        # made now, so that a name rope refuses fails before the GPU work, and a typo shows up right here
-        if lib.call("mkdir", "-p", into)["created"]:
-            print(f"new rope folder {into}")
+    if keep is keep_result:
+        # the results go into rope, so their folders are made now: a name rope refuses fails before the GPU work,
+        # and a typo shows up right here. A tool keeping its results elsewhere (img2vid.py, under --out) has its own
+        for into in dict.fromkeys(r.into for r in settled if r.into):
+            if lib.call("mkdir", "-p", into)["created"]:
+                print(f"new rope folder {into}")
     hashes = ModelHashes(lib.root / ".cache" / "model-sha256.json")
     with tempfile.TemporaryDirectory(prefix=f"{tool.file.stem}-") as workdir:
         all_inputs = prepare(settled, Path(workdir), lib, via=tool.name)
