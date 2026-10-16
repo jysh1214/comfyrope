@@ -22,14 +22,15 @@ BASE = img2vid.Request(
     seconds=5,
     size=640,
     into="tests/motion",  # the prefix of the rope folders: into_setting_loras, see folder()
-    # the rest, with their defaults: negative=None (Wan's own), steps=None, cfg=None, shift=None, fps=None,
+    # the rest, with their defaults: negative=None (Wan's own), steps=None, cfg=None, shift=None,
     # lightning=None ("4"), lora=[], tags=[], note=None
 )
 
-# 2. The settings to vary: every Lightning setting with every shift, and every choice of the LoRAs, each one in or
-#    out, the empty choice included (2 ** len(LORAS) choices).
+# 2. The settings to vary: every Lightning setting with every shift and every fps, and every choice of the LoRAs,
+#    each one in or out, the empty choice included (2 ** len(LORAS) choices).
 LIGHTNING = ["4"]  # "4", the 4-step LoRAs (about 1.5 minutes a clip), or "off", the full model (about 9 minutes)
 SHIFT = [3, 5, 8]  # ModelSamplingSD3's shift; the template's value is 5
+FPS = [16]  # frames per second; 16 is Wan's own rate, another value changes the frame count (seconds * fps) and the speed
 LORAS: list[str] = []  # name[:strength] as on the command line (.safetensors implied); applied to both models
 TRIGGERS: dict[str, str] = {}  # LoRA name (no strength, no .safetensors) -> the prompt its author asks for
 
@@ -48,12 +49,13 @@ def lora_name(lora: str | tuple[str, float]) -> str:
     return spec.split(":")[0].removesuffix(".safetensors")
 
 
-def folder(lightning: str, shift: float, loras: tuple[str, ...]) -> str:
-    """The rope folder of a combination: into_L<lightning>_shift<shift>[_loras], e.g. tests/motion_L4_shift5 or
-    tests/motion_Loff_shift8_motion:0.8. BASE's own LoRAs are in every combination, so they are not in the name."""
+def folder(lightning: str, shift: float, fps: int, loras: tuple[str, ...]) -> str:
+    """The rope folder of a combination: into_L<lightning>_shift<shift>_fps<fps>[_loras], e.g.
+    tests/motion_L4_shift5_fps16 or tests/motion_Loff_shift8_fps24_motion:0.8. BASE's own LoRAs are in every
+    combination, so they are not in the name."""
     if not BASE.into:
         raise ValueError("BASE.into is needed: the folders are named from it")
-    bits = [BASE.into, f"L{lightning}_shift{shift:g}"]
+    bits = [BASE.into, f"L{lightning}_shift{shift:g}_fps{fps}"]
     if loras:
         bits.append("+".join(l.replace(".safetensors", "") for l in loras))
     return "_".join(bits)
@@ -68,9 +70,9 @@ def prompt(loras: tuple[str, ...]) -> str:
 def batch():
     """The requests, one per combination, each BASE with the combination's fields changed; BASE's LoRAs stay."""
     # 3. The grid.
-    for lightning, shift, loras in itertools.product(LIGHTNING, SHIFT, choices(LORAS)):
-        yield dataclasses.replace(BASE, prompt=prompt(loras), lightning=lightning, shift=shift,
-                                  lora=[*BASE.lora, *loras], into=folder(lightning, shift, loras))
+    for lightning, shift, fps, loras in itertools.product(LIGHTNING, SHIFT, FPS, choices(LORAS)):
+        yield dataclasses.replace(BASE, prompt=prompt(loras), lightning=lightning, shift=shift, fps=fps,
+                                  lora=[*BASE.lora, *loras], into=folder(lightning, shift, fps, loras))
 
 
 def main() -> None:

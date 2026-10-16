@@ -471,7 +471,7 @@ The clip keeps the start image's aspect ratio, scaled so that its long side is `
 | `--replay ID` | Make a rope clip again from its record, as `img2img.py --replay` does for an image, except that the new clip is compared byte for byte; `--replay ID --help` lists its own options |
 | `--library DIR`, the ComfyUI options | As `img2img.py`'s |
 
-From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, **options)` returns a `Result` per clip, as `img2img.run()` does, with `id`, `path`, `folder`, `width`, `height` and `seconds`. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, LoRAs) and a `batch()`; each combination's clips go into a rope folder named after it, so `--list` and a run work the same way.
+From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, **options)` returns a `Result` per clip, as `img2img.run()` does, with `id`, `path`, `folder`, `width`, `height` and `seconds`. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, fps, LoRAs) and a `batch()`; each combination's clips go into a rope folder named after it, so `--list` and a run work the same way.
 
 **Not there yet.** Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
 
