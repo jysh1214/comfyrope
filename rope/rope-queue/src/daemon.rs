@@ -146,6 +146,8 @@ struct Daemon {
     proc: Option<Process>,
     comfy: Comfy,
     comfy_version: String,
+    /// What the subscribers were last told about ComfyUI, so they hear of every change and nothing else.
+    comfy_told: Option<(String, bool)>,
     deaths: VecDeque<Instant>,
     _lock: Lock,
     jobs: BTreeMap<u64, Job>,
@@ -193,6 +195,7 @@ pub fn run(mut opts: Options) -> Result<()> {
         proc: None,
         comfy: Comfy::Down,
         comfy_version: String::from("?"),
+        comfy_told: None,
         deaths: VecDeque::new(),
         _lock: lock,
         jobs: BTreeMap::new(),
@@ -294,6 +297,7 @@ impl Daemon {
 
     fn tick(&mut self) {
         self.check_comfy();
+        self.tell_comfy();
         self.conversions();
         self.watch_child();
         self.start_next();
@@ -708,6 +712,15 @@ impl Daemon {
         self.jobs.insert(job.id, job.clone());
         if changed {
             self.broadcast(Event::State { job: Box::new(job) }, Some(group));
+        }
+    }
+
+    /// Tells the subscribers when ComfyUI comes up or goes down, whichever way that happened.
+    fn tell_comfy(&mut self) {
+        let now = (self.comfy_version.clone(), matches!(self.comfy, Comfy::Up { .. }));
+        if self.comfy_told.as_ref() != Some(&now) {
+            self.comfy_told = Some(now.clone());
+            self.broadcast(Event::Comfy { version: now.0, up: now.1 }, None);
         }
     }
 

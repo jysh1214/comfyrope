@@ -106,6 +106,11 @@ pub enum Event {
         paused: bool,
         reason: Option<String>,
     },
+    /// ComfyUI came up, or went down; `version` is `?` until it has answered once.
+    Comfy {
+        version: String,
+        up: bool,
+    },
     Stopping,
 }
 
@@ -213,6 +218,15 @@ mod tests {
         assert_eq!((r.kind, r.graph, r.replay_of), (Kind::Add, None, None));
         assert!(serde_json::from_str::<ChildEvent>(r#"{"event": "dance"}"#).is_err());
         assert!(serde_json::from_str::<ChildEvent>("hello").is_err());
+    }
+
+    #[test]
+    fn events_name_themselves() {
+        let ev = Event::Comfy { version: "0.39.2".into(), up: true };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v, json!({"event": "comfy", "version": "0.39.2", "up": true}));
+        assert_eq!(serde_json::from_value::<Event>(v).unwrap(), ev);
+        assert_eq!(serde_json::to_value(Event::Stopping).unwrap(), json!({"event": "stopping"}));
     }
 
     #[test]

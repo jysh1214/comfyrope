@@ -221,6 +221,7 @@ impl App {
                         r.progress = Some((value, max));
                     }
                 }
+                Msg::Event(Event::Comfy { version, up }) => self.queue.comfy = Some((version, up)),
                 Msg::Event(Event::Paused { paused, reason }) => {
                     self.queue.paused = paused;
                     self.queue.reason = reason;
