@@ -83,7 +83,7 @@ rope-queue log 123           # what job 123 printed
 rope-queue cancel 123        # a job;  cancel g40  a whole group
 rope-queue retry 123         # run a failed or cancelled job again
 rope-queue pause             # finish the running job, start none;  resume  goes on
-rope-queue clear             # forget the finished jobs
+rope-queue clear             # forget the finished jobs; an emptied queue counts from #1 again
 rope-queue stop
 ```
 

@@ -330,7 +330,8 @@ impl App {
         socket::call(req)
     }
 
-    /// The middle: the status line, then every group newest first, its jobs in order.
+    /// The middle: the status line, then every group in the order the daemon takes them, oldest first, and its jobs
+    /// in order, so the page reads top to bottom as the queue runs.
     pub(super) fn queue_page(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         self.queue_status(ui, actions);
         ui.separator();
@@ -348,7 +349,7 @@ impl App {
                 ui.add_space(12.0);
                 ui.label(RichText::new("No jobs. img2img.py and img2vid.py put theirs here.").weak());
             }
-            for (gid, jobs) in groups.iter().rev() {
+            for (gid, jobs) in &groups {
                 self.group_header(ui, *gid, jobs, actions);
                 for job in jobs {
                     self.job_row(ui, &model, job, actions);
@@ -430,11 +431,12 @@ impl App {
             .scope_builder(header, |ui| {
                 egui::Frame::group(ui.style()).fill(fill).show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    // what the group is: its input and prompt, where it goes, its tags; a batch's groups share the
+                    // command line and differ in these
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(RichText::new(format!("g{gid}")).strong()).selectable(false));
-                        let command = shell_join(&first.submitted.argv);
                         ui.add(
-                            egui::Label::new(RichText::new(command).monospace().small()).truncate().selectable(false),
+                            egui::Label::new(RichText::new(group_title(first)).strong()).truncate().selectable(false),
                         );
                     });
                     ui.horizontal(|ui| {
@@ -445,12 +447,13 @@ impl App {
                         if failed > 0 {
                             parts.push(format!("{failed} failed or cancelled"));
                         }
-                        parts.push(match &first.into {
-                            Some(f) => format!("→ {f}"),
-                            None => "→ unfiled".to_owned(),
-                        });
                         parts.push(clock(&first.created));
-                        ui.add(egui::Label::new(RichText::new(parts.join("  ·  ")).weak().small()).selectable(false));
+                        parts.push(shell_join(&first.submitted.argv));
+                        ui.add(
+                            egui::Label::new(RichText::new(parts.join("  ·  ")).weak().small())
+                                .truncate()
+                                .selectable(false),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let bar = egui::ProgressBar::new(done as f32 / jobs.len().max(1) as f32)
                                 .desired_width(120.0)
@@ -485,6 +488,10 @@ impl App {
     fn job_row(&mut self, ui: &mut egui::Ui, model: &crate::model::Model, job: &Job, actions: &mut Vec<Action>) {
         let selected = self.queue.selected == Some(Sel::Job(job.id));
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW), Sense::click());
+        // a batch is hundreds of rows: the ones scrolled out of view take their space and nothing else
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
         if selected {
             ui.painter().rect_filled(rect, 3.0, ui.visuals().selection.bg_fill.gamma_multiply(0.35));
         } else if resp.hovered() {
@@ -861,6 +868,34 @@ fn state_text(ui: &egui::Ui, state: State) -> RichText {
     }
 }
 
+/// A group in a line: `photo: the prompt…  → folder  · tags`, or `replay of 3fa9c1e27b0d`.
+fn group_title(first: &Job) -> String {
+    let prompt: String = first.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let what = match (&first.replay, first.inputs.as_slice()) {
+        (Some(id), _) => format!("replay of {}", short(id)),
+        (None, []) => prompt,
+        (None, [one]) => format!("{}: {prompt}", one.name),
+        (None, [one, rest @ ..]) => format!("{} +{}: {prompt}", one.name, rest.len()),
+    };
+    let mut title = cut(&what, 80);
+    title += &match &first.into {
+        Some(f) => format!("  → {f}"),
+        None => "  → unfiled".to_owned(),
+    };
+    if !first.tags.is_empty() {
+        title += &format!("  · {}", first.tags.join(", "));
+    }
+    title
+}
+
+/// The first `n` characters, with an ellipsis when that is not all of them.
+fn cut(s: &str, n: usize) -> String {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_owned(),
+    }
+}
+
 /// `s42` from the job's `--seed=42`.
 fn seed_of(job: &Job) -> String {
     job.flags
@@ -918,6 +953,8 @@ mod tests {
     fn words_for_rows() {
         assert_eq!(clock("2026-10-17T17:56:46+08:00"), "17:56:46");
         assert_eq!(clock("soon"), "soon");
+        assert_eq!(cut("abc", 3), "abc");
+        assert_eq!(cut("把背景換成黃昏的海邊", 4), "把背景換…");
         assert_eq!(hms(Duration::from_secs(75)), "1:15");
         assert_eq!(hms(Duration::from_secs(3700)), "1h01m");
         assert_eq!(skipped(&serde_json::json!([])), "");

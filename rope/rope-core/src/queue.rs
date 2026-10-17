@@ -250,7 +250,8 @@ fn counters_path(lib: &Library) -> PathBuf {
 
 // ---------------------------------------------------------------- counters
 
-/// queue.json: the next ids to give out. Both only ever grow.
+/// queue.json: the next ids to give out. Both only grow, until `clear` leaves the queue empty: then they start from
+/// one again, since nothing is left that an id could refer to.
 #[derive(Debug, Serialize, Deserialize)]
 struct Counters {
     format: u32,
@@ -590,11 +591,17 @@ pub fn remove(lib: &Library, ids: &[u64]) -> Result<()> {
     Ok(())
 }
 
-/// Removes every finished job and answers their ids.
+/// Removes every finished job and answers their ids. A queue left empty counts from one again (user's decision,
+/// 2026-10-17): the ids tell jobs apart on the screen, and once every job is gone there is nothing they could clash
+/// with.
 pub fn clear(lib: &Library) -> Result<Vec<u64>> {
     let ids: Vec<u64> = list(lib)?.iter().filter(|j| j.is_terminal()).map(|j| j.id).collect();
     if !ids.is_empty() {
         remove(lib, &ids)?;
+    }
+    let _lock = lib.lock()?;
+    if list(lib)?.is_empty() {
+        Counters { format: FORMAT, next_job: 1, next_group: 1, other: Map::new() }.save(lib)?;
     }
     Ok(ids)
 }
@@ -652,17 +659,24 @@ mod tests {
         assert_eq!(clear(&lib).unwrap(), [1, 2, 3, 4, 5]);
         assert!(list(&lib).unwrap().is_empty() && !job_dir(&lib, 1).exists());
         let third = submit(&lib, &group("img2img.py", 1)).unwrap();
-        assert_eq!((third[0].id, third[0].group.id), (6, 3), "ids of cleared jobs are not reused");
+        assert_eq!((third[0].id, third[0].group.id), (1, 1), "an emptied queue counts from one again");
         let counters = fs::read_to_string(counters_path(&lib)).unwrap();
-        assert!(counters.contains(r#""next_job": 7"#) && counters.contains(r#""next_group": 4"#), "{counters}");
+        assert!(counters.contains(r#""next_job": 2"#) && counters.contains(r#""next_group": 2"#), "{counters}");
+
+        // a clear that leaves a job behind keeps counting
+        let fourth = submit(&lib, &group("img2img.py", 1)).unwrap();
+        assert_eq!((fourth[0].id, fourth[0].group.id), (2, 2));
+        cancel(&lib, 1).unwrap();
+        assert_eq!(clear(&lib).unwrap(), [1]);
+        assert_eq!(submit(&lib, &group("img2img.py", 1)).unwrap()[0].id, 3, "job #2 is still there");
 
         let lines = journal_lines(&lib);
         let queue: Vec<&Value> = lines.iter().filter(|l| l["op"] == "queue").collect();
-        assert_eq!(queue.len(), 3 + 5 + 1, "three submissions, five cancellations, one clear");
+        assert_eq!(queue.len(), 5 + 6 + 2, "five submissions, six cancellations, two clears");
         assert_eq!(queue[0]["jobs"], json!([1, 3]));
         assert!(queue.iter().all(|l| l["ids"] == json!([])), "the GUI loads every id as an image");
         assert_eq!(queue[7]["removed"], json!([1, 2, 3, 4, 5]));
-        assert_eq!(queue[8]["jobs"], json!([6, 6]));
+        assert_eq!(queue[8]["jobs"], json!([1, 1]));
     }
 
     #[test]
