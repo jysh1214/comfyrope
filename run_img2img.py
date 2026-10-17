@@ -28,7 +28,7 @@ BASE = img2img.Request(
 # 2. The settings to vary: every model in LORAS, with every choice of its LoRAs, each one in or out, the empty
 #    choice included (2 ** len(LoRAs) choices), and for 2511 every Lightning setting as well.
 LORAS = {  # model -> its LoRAs, name[:strength] as on the command line (.safetensors implied); [] for plain only
-    "2511": ["qwen-edit-skin-1.1", "Skin_Fix_rank64:0.8"],
+    "2511": ["qwen-edit-skin-1.1", "Skin_Fix_rank64:0.7"],
     "2.1": [],
 }
 LIGHTNING = ["4", "8"]  # 2511 only
