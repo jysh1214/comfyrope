@@ -239,7 +239,9 @@ When things go wrong:
 
 ## rope-queue
 
-`rope-queue` is the work queue for ComfyUI jobs, a binary of its own in this workspace (`cargo build` makes it too). Started alone it is the daemon: it starts ComfyUI in place of `./run_comfyui.sh`, takes jobs from `img2img.py` and `img2vid.py`, runs them one at a time in order and puts every result into the library, with a screen that shows the queue. Ctrl-C interrupts the running job, which goes back to the head of the line, and stops ComfyUI with the daemon. With a subcommand it talks to the running daemon: `ls`, `log ID`, `cancel 123 g40`, `retry 123 g40`, `pause`, `resume`, `stop`, `reload`, `clear`, each with `--json`.
+`rope-queue` is the work queue for ComfyUI jobs, a binary of its own in this workspace (`cargo build` makes it too). Started alone it is the daemon: it starts ComfyUI in place of `./run_comfyui.sh`, takes jobs from `img2img.py` and `img2vid.py`, runs them one at a time in order and puts every result into the library, with a screen that shows the queue. Ctrl-C interrupts the running job, which goes back to the head of the line, and stops ComfyUI with the daemon. With a subcommand it talks to the running daemon: `status`, `ls`, `log ID`, `cancel 123 g40`, `retry 123 g40`, `pause`, `resume`, `stop`, `reload`, `clear`, each with `--json`.
+
+`img2img.py` and `img2vid.py` hand every command to it: they check the request, print `queued #123–#172 (group 40) …` and return; what becomes of the jobs the screen, `ls` and `log` show. The daemon runs each job as `img2img.py --job DIR` and converts inputs with `comfyconvert.py`, both with the repo's `.venv` (setup_venv.sh), and finds the repo by `--repo` the first time, then by the library's `REPO` file. `--no-queue` runs a command's ComfyUI work in the command itself, as before the queue.
 
 Its data lives in the library under `queue/`: one directory per job with its `job.json` and `log`, the id counters in `queue.json`, and ComfyUI's logs under `comfyui/`. `rope purge` leaves the inputs of unfinished jobs alone, as it leaves those of a running `img2img.py`. The design, with the job and event formats, is in `rope-queue/DESIGN.md`.
 

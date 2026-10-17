@@ -1,6 +1,6 @@
 # rope-queue: a work queue for ComfyUI jobs
 
-Written 2026-10-17. rope-core's `queue.rs` and the `rope-queue` crate follow it; the Python side (`--job`, submitting, `comfyconvert.py`) is next. Where the code settled a detail the draft left open, this file says what the code does.
+Written 2026-10-17. rope-core's `queue.rs`, the `rope-queue` crate and the Python side (`comfyqueue.py`, `comfyconvert.py`) follow it. Where the code settled a detail the draft left open, this file says what the code does.
 
 ## What it is for
 
@@ -41,9 +41,10 @@ rope/
 ├── rope/                    # CLI: unchanged in behavior; the replay comparison moves into rope-core
 └── rope-gui/                # a Queue page; progress over the socket
 comfyrope/
-├── comfycore.py             # submits to the daemon; job mode: runs one job for it
+├── comfycore.py             # unchanged in what it knows; the direct path stays, for --no-queue
+├── comfyqueue.py            # NEW: submits to the daemon; job mode: runs one job for it
 ├── comfyconvert.py          # NEW: the input converter as a command, for the conversion stage
-└── img2img.py, img2vid.py   # unchanged in what they know; gain --job, --wait, --no-queue
+└── img2img.py, img2vid.py   # unchanged in what they know; gain --job and --no-queue
 ```
 
 rope-core and the rope CLI gain no dependency: the CLI is started by Python for every library call and has to stay small. Everything that talks to ComfyUI or draws a terminal screen is in rope-queue:
@@ -183,12 +184,12 @@ The daemon, under the queue lock:
 
 1. Imports each image through `store::add`, `via` the tool, as `prepare()` does today; resolves `@ID`. Bytes rope already has cost nothing.
 2. Allocates a group id and `count` job ids per request, consecutive; writes the job dirs; one journal line for the group.
-3. Replies with a group and its job ids per request, `{"group": 40, "jobs": [123, 172]}`, or the reason a request was skipped: an `@ID` rope does not have, an `into` that is not a folder name rope accepts. The tool prints `queued #123–#172 (group 40): model 2511, Lightning 4-step, seeds 42–91 → 緣/v-咖啡廳_2511_skin`, one line per request, and the skipped ones with their reasons; it exits with 1 when any was skipped.
+3. Replies with a group and its job ids per request, `{"group": 40, "jobs": [123, 172]}`, or the reason a request was skipped: an `@ID` rope does not have, an `into` that is not a folder name rope accepts. The tool prints `queued #123–#172 (group 40) photo.jpg: model 2511, Lightning 4-step, 4 steps, cfg 1, seed 42-91 → 緣/v-咖啡廳_2511_skin`, one line per request, and the skipped ones with their reasons; it exits with 1 when any was skipped.
 4. Starts the conversion stage for every distinct input that has no rendition yet.
 
 Only two things fail the whole submission: the socket does not answer ("rope-queue is not running; start it first"), or the tool is not in the repo.
 
-`--wait` keeps the connection open, subscribed to the group, until every job is terminal, and then returns the results. This keeps the contract of `img2img.run()` returning a `Result` per image, and lets a script feed one step's image to the next.
+`add --wait` keeps the connection open, subscribed to the groups, until every job is terminal, and then prints every job. It is for shell scripts that feed one step's result to the next; the Python tools never wait (see "Python side").
 
 ## Conversion stage
 
@@ -239,22 +240,60 @@ A Queue page beside Prompts: groups and jobs read through `rope_core::queue`, re
 
 ## Python side
 
-To be worked out next, together with `run_*.py`. The shape is fixed by the above:
+Decided 2026-10-17, after the daemon: a Python tool **submits and exits**. It never waits for a job and never hears how one went. Errors after submission, and what is done about them, are rope-queue's: the screen, `rope-queue ls` and `log`, later rope-gui. What a tool reports is what the user needs the moment they press Enter: what was queued, what was skipped and why, or that rope-queue is not running.
 
-- `--job DIR`: build the Request from `job.json` (`flags`, the inputs' library files, `prompt`), make exactly one image or clip against `$COMFYUI_SERVER` with `$COMFYUI_CLIENT_ID`, never start or stop ComfyUI, write the result with `made.json` and `graph.json` into `out/`, speak events on stdout, exit with the codes above. No rope calls. The recipe is built as today: flags, prompt, inputs (ids from `job.json`), ComfyUI's environment, model hashes (the cache stays in the library's `.cache/`), code identity.
-- Submitting is the default. `--no-queue` runs directly as today, for debugging. `--wait` submits and waits.
-- `comfyconvert.py`.
-- Fixes found on the way, wanted with or without the queue: `--replay` cancels its prompt on any exception, not only Ctrl-C; the direct path masks SIGINT around rope calls, so a result in flight is never lost; `wait()` asks `/queue` before giving up on a silent job.
+Three entry points, in a new `comfyqueue.py`; comfycore.py keeps the direct path and everything a job needs to build and record a result.
+
+### Submitting
+
+`comfyqueue.submit(tool, requests, *, fresh, library)`, which the tools' default path and `img2img.run()`/`img2vid.run()` call:
+
+1. `settle()` every request. A `ValueError` (a bad field: a programming error) stops the whole batch before anything is sent, as today.
+2. Check each request against what would otherwise fail hours later, and **skip** the ones that fail, printing the reason and its fix: the model and LoRA files of its workflow (`tool.build()` once, with the dry-run context, then `model_paths()`; the `FETCH` command for a missing file), and that every input file is a format the converter reads (`convertible()`, shared with `comfyconvert.py`).
+3. Build one `SubmitRequest` per request: `flags` is `tool.flags(r, base + i)` for each of its `count` jobs, `base` the request's seed or one drawn now; `first_seed`, `prompt`, `images` as given (`cwd` goes along), `into` with `$IMG2IMG_INTO` resolved, `tags`, `note`, `fresh`.
+4. `rope-queue --json add` with the submission on stdin. The binary is `$ROPE_QUEUE`, else `rope/target/release/rope-queue`, else on `PATH`, as `rope` is found. One line per request from the answer:
+
+```
+queued #123–#172 (group 40) photo.jpg: model 2511, Lightning 4-step, 4 steps, cfg 1, seed 42-91 → 緣/v-咖啡廳_2511_skin
+skipped request 2, photo.heic:
+  ComfyUI lacks models/loras/Skin_Fix_rank64.safetensors; fix: uv run download_models.py 2511 --skin-loras skin-fix
+```
+
+The exit code is 1 when any request was skipped, by Python or by the daemon (an `@ID` rope lacks, an `into` it refuses). When the socket does not answer, nothing is sent: `rope-queue is not running; start it with: rope-queue --repo ~/comfyrope`, exit 1. A `--library` other than the one the daemon serves is refused too: `ping` answers the daemon's library.
+
+`img2img.run()` and `img2vid.run()` return what was submitted, a `Submitted` per request: `group` and `jobs` (first and last id), or `skipped` (why). `Result` is the direct path's only. The ComfyUI options (`--server`, `--keep-server`, `--no-start`, `--comfy-args`, `--timeout`) belong to the direct path: given without `--no-queue` the command fails and says so, and `run()` no longer takes them. `--fresh`, `--into`, `--tag`, `--note`, `--library` and `--dry-run` work the same in both modes.
+
+`--replay ID` submits too: one request with `replay` the id, the inputs as `@ID`s, and `flags` the replay's own options (`-s`, `--rebuild`, the tool's), which the job parses as the command did; the recorded flags and workflow it reads from the item. One job. What needs no ComfyUI is still printed at submission, the workflow diff and the model changes; the environment diff moves to the child's stderr, the job's log. `--replay --dry-run` and `--replay --no-queue` are as today.
+
+`run_*.py`: `--list` as today; otherwise the `queued` lines and `8 requests queued as groups 40–47, 400 jobs`. `OPTIONS` keeps `fresh` and `library`. The Python API has no direct path: a batch that must run without the daemon is a matter of single commands with `--no-queue`.
+
+### `--job DIR`
+
+`comfyqueue.job_main(tool, dir)`: the daemon's child, which makes exactly one image or clip and speaks the events above on stdout. Everything human-readable goes to stderr, into the job's log.
+
+- Reads `job.json`. The inputs' files come from the library, read as files, never through the rope command: `items/<2>/<id>/meta.json` names the image file, and the `rendition` is `uploaded/<rendition>.png` in the same item. `tool.replay.parse([*flags, "--", *files, prompt])` rebuilds the Request through the tool's own parser, the way `--replay` does today.
+- Talks to the ComfyUI at `$COMFYUI_SERVER` as `$COMFYUI_CLIENT_ID`; never starts or stops one. Uploads the inputs (named as today, with the fresh tag when `fresh`), fetches the tool's context (img2img.py's enhancer prompt: one request per job, cheap), builds the workflow, queues it and at once reports `comfy`, then follows that one prompt on the websocket. `Status` in event mode turns the status line into `stage` and `progress` events.
+- Writes `out/<name><suffix>`, `out/made.json`, `out/graph.json` and `out/result.json`, then reports `result` and `end`. The name is `run_name()` with the job's `created` time, so a group's results sort together. The recipe is built as today: the flags as recorded, the prompt, the inputs (`id`, `uploaded`, the upload name), `batch` from `group`, ComfyUI's environment, the model hashes (the cache stays `.cache/model-sha256.json`, read and written as a file), the code identity.
+- Exit codes: ComfyUI unreachable or the websocket lost, 75. `execution_error`, or a prompt ComfyUI rejects (a missing model file, with its download command): an `error` event and 1. SIGINT: the prompt is cancelled, 130.
+- A replay job (`replay` set) reads that item's `meta.json` (the recipe) and `graph.json`, parses its `flags` as the replay options, goes through `replay_graph()` as the direct path does, and reports its result with `kind: replayed`.
+
+### `comfyconvert.py`
+
+`comfyconvert.py FILE OUTDIR --json`: `prepare_inputs()` as a command, one line on stdout, `{"as_is": true}` or `{"file": "1_photo.png", "steps": "HEIF, converted to PNG", "libs": {...}}`; a failure is a message on stderr and exit 1. Without `--json` it says the same in words, for trying by hand. The direct path keeps calling `prepare_inputs()` in process.
+
+### Fixes found on the way
+
+Wanted with or without the queue: `--replay` cancels its prompt on any exception, not only Ctrl-C; the direct path masks SIGINT around rope calls, so a result in flight is never lost; `wait()` asks `/queue` before giving up on a silent job.
 
 ## Client commands
 
-The same binary with a subcommand is a client of the running daemon, over the socket: `add [--wait]` (what the Python tools call), `ls`, `log ID`, `cancel 123 g40` and `retry 123 g40` (plain numbers are jobs, `g40` is group 40), `pause`, `resume`, `stop`, `reload`, `clear`. Every one takes `--json`, as the rope CLI does. `ls`, `log` and `clear` work without a daemon too, reading the files, so jobs left behind by a stopped daemon can be seen and cleaned up.
+The same binary with a subcommand is a client of the running daemon, over the socket: `add [--wait]` (what the Python tools call), `status` (is a daemon running, for which library, is ComfyUI up), `ls`, `log ID`, `cancel 123 g40` and `retry 123 g40` (plain numbers are jobs, `g40` is group 40), `pause`, `resume`, `stop`, `reload`, `clear`. Every one takes `--json`, as the rope CLI does. `ls`, `log` and `clear` work without a daemon too, reading the files, so jobs left behind by a stopped daemon can be seen and cleaned up.
 
 The daemon itself takes `--library DIR`, `--repo DIR` (default: where a tool run last recorded it), `--server HOST:PORT` (default 127.0.0.1:8188), `--reserve-vram GB` (default 2; 0 leaves ComfyUI's default), `--job-timeout MIN` (default 30), `--converter FILE` (default `comfyconvert.py` in the repo), `--no-screen`, and after `--` anything for ComfyUI. Without a terminal it prints one line per change instead of drawing the screen.
 
 ## Open points
 
-None. Deferred by decision: keeping the GPU busy between jobs, the group layer on the screen, submitting from rope-gui, and the Python side (next).
+None. Deferred by decision: keeping the GPU busy between jobs, the group layer on the screen, and submitting from rope-gui.
 
 ## Size
 
@@ -265,4 +304,4 @@ Estimated from the code each part replaces or extends; not measured.
 | rope-core: `queue.rs` with tests, the purge hook, the replay comparison moved in | ~500 |
 | rope-queue: daemon loop, ComfyUI management, import, socket and protocol, conversion stage, screen, client commands | ~1800 |
 | rope-gui: the Queue page | ~500 |
-| comfycore: job mode, submission, events; `comfyconvert.py` | ~400 |
+| comfyqueue.py: job mode, submission, events; `comfyconvert.py` | ~400 |

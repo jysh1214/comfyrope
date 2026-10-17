@@ -24,9 +24,10 @@ Single-frame PNG, JPEG and WebP files are uploaded as they are. Anything else is
 upright, single-frame sRGB PNG first: HEIC/HEIF, AVIF, JPEG XL, camera RAW, GIF, TIFF, BMP, PSD and the
 other formats Pillow reads. Animations and multi-page files keep only their first frame.
 
-The script talks to the ComfyUI at --server (default http://127.0.0.1:8188). If none is running it starts
-one with run_comfyui.sh for this command and stops it afterwards; --keep-server leaves it running so the
-next command skips the model load.
+The command hands its images to rope-queue (rope/README.md), which owns ComfyUI, runs the jobs in order and
+puts every result into rope, and it comes back at once; rope-queue has to be running. --no-queue does the
+ComfyUI work in this command instead: it talks to the ComfyUI at --server (default http://127.0.0.1:8188),
+starts one with run_comfyui.sh for the command if none answers, and --keep-server leaves that one running.
 
 Results go into the rope image library (rope/, by default in ~/.local/share/rope), which has to be built
 first, and so does every input, so a result can be made again after its inputs are moved or deleted. Each
@@ -36,18 +37,18 @@ folder, made if there is none, and an input can be @ID, an image in rope. --repl
 compares the pixels. The PNG also embeds the API workflow ComfyUI ran; drop it on the ComfyUI page to see that
 workflow as a node graph.
 
-From Python, import it and give run() a Request per combination to try: they all go through one ComfyUI, and
-every result lands in rope with its recipe, so the combinations can be compared in rope-gui:
+From Python, import it and give run() a Request per combination to try: each becomes a group of jobs in
+rope-queue, and every result lands in rope with its recipe, so the combinations can be compared in rope-gui:
 
     import img2img
     skin = "qwen-edit-skin-1.1.safetensors"
     requests = [img2img.Request(["photo.jpg"], "make the subjects skin details more prominent and natural",
                                 seed=42, lora=[(skin, s)], into="tests/skin", tags=[f"skin {s}"])
                 for s in (0.8, 1.0, 1.2)]
-    for r in img2img.run(requests):
-        print(r.short, r.folder, r.request.lora)
+    for s in img2img.run(requests):
+        print(s.group, s.jobs, s.request.lora)
 
-A Request has a field per option above, and run() takes the ComfyUI and --library options as keyword arguments.
+A Request has a field per option above; run() takes fresh and library as keyword arguments.
 The Python that imports it needs the packages listed at the top, e.g. .venv from setup_venv.sh.
 """
 from __future__ import annotations
@@ -64,10 +65,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Comfy, ComfyError, Error, Graph, Library, Options,
-                       Replay, Result, Tool, add_comfy_args, add_loras, check_packages, die, exact, link, parse_lora,
-                       prepare, replay_main, rope_ref, run_requests, upload_name)
+                       Replay, Tool, add_comfy_args, add_loras, check_packages, die, direct_only, exact, link,
+                       parse_lora, prepare, rope_ref, run_requests, upload_name)
+from comfyqueue import Submitted, job_main, replay_main, submit
 
-__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
+__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Submitted", "run", "workflow"]
 
 # Model files as the ComfyUI templates name them (download_models.py fetches them).
 EDIT_2511 = {
@@ -284,27 +286,20 @@ def context(comfy: Comfy, requests: list[Request]) -> str | None:
 
 
 
-def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
-        no_start: bool = False, comfy_args: str | Iterable[str] = (), timeout: int = TIMEOUT, fresh: bool = False,
-        library: str | None = None) -> list[Result]:
-    """Makes the images of every request, all through one ComfyUI, and keeps them in rope. Returns a Result per
-    image: the requests in order, and each request's images in seed order.
+def run(requests: Request | Iterable[Request], *, fresh: bool = False, library: str | None = None) -> list[Submitted]:
+    """Hands the images of every request to rope-queue, one group of `count` jobs per request, and returns a Submitted
+    per request, in order: its group and job ids, or why it was skipped. rope-queue runs the jobs on its ComfyUI and
+    puts every image into rope with its recipe; nothing here waits for them, and what becomes of them is rope-queue's
+    to show (its screen, `rope-queue ls`, rope-gui).
 
-    Every request is checked first (a bad one is a ValueError), so nothing runs until all of them are good. Like
-    the command line, it prints what it does. A failure raises Error and drops the jobs still queued; Ctrl-C does
-    the same; what was made before stays in rope. The keyword arguments are the command line's ComfyUI and
-    --library options, with the same defaults:
-      server       the ComfyUI; if none answers there, one is started for this run and stopped afterwards
-      keep_server  leave a ComfyUI this run started running, so that the next run skips the model load
-      no_start     raise instead of starting a ComfyUI
-      comfy_args   extra flags for a ComfyUI this run starts, e.g. "--reserve-vram 2"
-      timeout      give up when ComfyUI has said nothing about the jobs for this many seconds
-      fresh        compute again even when ComfyUI has cached the result of an identical workflow
-      library      the rope library; default $ROPE_LIBRARY, else ~/.local/share/rope
+    Every request is checked first (a bad one is a ValueError), so nothing is sent until all of them are good. A
+    request whose input the converter cannot read, or whose model or LoRA file ComfyUI lacks, is printed with its fix
+    and skipped; the others go on. Like the command line, it prints what it does, one line per request, and raises
+    Error when rope-queue is not built or not running. The keyword arguments:
+      fresh    compute again even when ComfyUI has cached the result of an identical workflow
+      library  the rope library; default $ROPE_LIBRARY, else ~/.local/share/rope
     """
-    flags = shlex.split(comfy_args) if isinstance(comfy_args, str) else list(comfy_args)
-    opts = Options(server, keep_server, no_start, flags, timeout, fresh, library)
-    return run_requests(TOOL, [requests] if isinstance(requests, Request) else requests, opts)
+    return submit(TOOL, [requests] if isinstance(requests, Request) else requests, fresh=fresh, library=library)
 
 
 # ---------------------------------------------------------------- cli
@@ -346,6 +341,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_comfy_args(g)
     g.add_argument("--dry-run", action="store_true", help="print the API workflow JSON and stop; nothing is uploaded or run")
     a = p.parse_args(argv)
+    direct_only(p, a)
     try:
         a.request = Request(a.images, a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
                             steps=a.steps, cfg=a.cfg, lora=a.lora, lightning=a.lightning, resolution=a.resolution,
@@ -371,6 +367,8 @@ def workflow(request: Request, seed: int = 0, *, fresh: bool = False, library: s
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--job"] and len(argv) == 2:  # rope-queue's child: one job, see comfyqueue.job_main
+        return job_main(TOOL, Path(argv[1]))
     if any(arg == "--replay" or arg.startswith("--replay=") for arg in argv):
         return replay_main(TOOL, argv)
     a = parse_args(argv)
@@ -379,8 +377,11 @@ def main(argv: list[str]) -> int:
         seed = a.request.seed if a.request.seed is not None else 0
         print(json.dumps(workflow(a.request, seed, fresh=a.fresh, library=a.library), indent=2, ensure_ascii=False))
         return 0
-    run(a.request, **vars(a.options))
-    return 0
+    if a.no_queue:  # the direct path: this command runs the jobs itself
+        run_requests(TOOL, [a.request], a.options)
+        return 0
+    submitted = submit(TOOL, [a.request], fresh=a.fresh, library=a.library)
+    return 1 if any(s.skipped for s in submitted) else 0
 
 
 # ---------------------------------------------------------------- replay

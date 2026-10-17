@@ -1,7 +1,9 @@
 """What the scripts that make things with ComfyUI share; img2img.py is one, and keeps only what is about its
 models. Nothing in here knows a model. It talks to ComfyUI, starting one when none answers; brings the inputs
 into the rope library and converts those ComfyUI cannot read; follows the queued workflows; and hands every
-result to rope with its recipe: the flags, the inputs, the model files' hashes, and the ComfyUI it ran on.
+result to rope with its recipe: the flags, the inputs, the model files' hashes, and the ComfyUI it ran on. That is
+the direct path (--no-queue); comfyqueue.py puts the same pieces to work for rope-queue, which a command hands its
+requests to and which runs each job as a child of the tool.
 
 Not a script, so it has no package header: the script that imports it lists the packages (websocket-client and
 the image decoders) in its own header, and setup_venv.sh installs them from there. A tool on top of it is a Tool:
@@ -51,6 +53,10 @@ class Error(Exception):
     prints it as `error: ...` and exits with 1."""
 
 
+class Unreachable(Error):
+    """ComfyUI does not answer, or the connection to it was lost: nothing is known to be wrong with the job itself."""
+
+
 def die(msg: str) -> NoReturn:
     raise Error(msg)
 
@@ -61,19 +67,35 @@ def tilde(p: Path) -> str:
 
 
 class Status:
-    """A live status line on a terminal; plain lines (one per stage) when stdout is a file or pipe."""
+    """A live status line on a terminal; plain lines (one per stage) when stdout is a file or pipe. With `events`, a
+    rope-queue job's, the stages and progress go to it as events (comfyqueue.job_main) and the lines are printed."""
 
-    def __init__(self) -> None:
+    def __init__(self, events: Callable[[dict], None] | None = None) -> None:
         self.tty = sys.stdout.isatty()
         self.stage = ""
+        self.events = events
 
     def show(self, stage: str, detail: str = "") -> None:
-        if self.tty:
+        if self.events is not None:
+            if stage != self.stage:
+                self.events({"event": "stage", "text": stage})
+        elif self.tty:
             sys.stdout.write(f"\r\x1b[K  {stage} {detail}".rstrip())
             sys.stdout.flush()
         elif stage != self.stage:
             print(f"  {stage}")
         self.stage = stage
+
+    def progress(self, stage: str, value, maximum) -> None:
+        """A stage with a count, "sampling 2/4"."""
+        if self.events is None:
+            self.show(stage, f"{value}/{maximum}")
+            return
+        self.show(stage)
+        try:
+            self.events({"event": "progress", "value": int(value), "max": int(maximum)})
+        except (TypeError, ValueError):
+            pass
 
     def line(self, text: str) -> None:
         if self.tty and self.stage:
@@ -199,6 +221,36 @@ AS_IS = {"PNG", "JPEG", "WEBP"}
 RAW_SUFFIXES = {".dng", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".orf", ".rw2",
                 ".pef", ".srw", ".x3f", ".3fr", ".iiq", ".rwl", ".mrw", ".erf", ".kdc", ".dcr", ".mos"}
 
+UNKNOWN_FORMAT = ("not an image format this script knows. It reads what Pillow reads (PNG, JPEG, WebP, AVIF, GIF, BMP, "
+                  "TIFF, PSD, ...), plus HEIC/HEIF, JPEG XL and camera RAW; export vector formats such as SVG to PNG first")
+
+
+def register_decoders() -> None:
+    """Teaches Pillow HEIC/HEIF and JPEG XL: importing the plugins is what registers them."""
+    import pillow_heif
+    import pillow_jxl  # noqa: F401
+
+    pillow_heif.register_heif_opener()
+
+
+def convertible(path: Path) -> str | None:
+    """Why prepare_inputs() would refuse this file, or None when it reads it: the format check alone, from the file's
+    header, so that a bad input is caught when the request is made and not when its turn comes. A camera RAW file is
+    taken on its suffix; rawpy reads the whole file, so a damaged one shows up at conversion."""
+    if path.suffix.lower() in RAW_SUFFIXES:
+        return None
+    register_decoders()
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(path):
+            pass
+    except UnidentifiedImageError:
+        return f"cannot read {path}: {UNKNOWN_FORMAT}"
+    except (OSError, ValueError, SyntaxError) as e:
+        return f"cannot decode {path}: {e}"
+    return None
+
 
 def flatten(im):
     """First frame, upright, 8-bit sRGB RGB (or RGBA when the image has transparency)."""
@@ -236,11 +288,9 @@ def develop_raw(src: Path, dst: Path) -> None:
 def prepare_inputs(paths: list[Path], workdir: Path, stems: list[str]) -> list[tuple[Path, str]]:
     """The files to upload, each with how it was converted, or "" when it goes up as it is: single-frame
     PNG/JPEG/WebP as they are, everything else converted to PNG in workdir, named after its stem in `stems`."""
-    import pillow_heif
-    import pillow_jxl  # noqa: F401  (importing it registers JPEG XL with Pillow)
     from PIL import Image, UnidentifiedImageError
 
-    pillow_heif.register_heif_opener()
+    register_decoders()
     ready = []
     for n, (src, stem) in enumerate(zip(paths, stems), start=1):
         dst = workdir / f"{n}_{stem.replace('/', '_')}.png"
@@ -259,9 +309,7 @@ def prepare_inputs(paths: list[Path], workdir: Path, stems: list[str]) -> list[t
                     continue
                 flatten(im).save(dst)
         except UnidentifiedImageError:
-            die(f"cannot read {src}: not an image format this script knows. It reads what Pillow reads (PNG, JPEG, "
-                "WebP, AVIF, GIF, BMP, TIFF, PSD, ...), plus HEIC/HEIF, JPEG XL and camera RAW; export vector "
-                "formats such as SVG to PNG first")
+            die(f"cannot read {src}: {UNKNOWN_FORMAT}")
         except (OSError, ValueError, SyntaxError) as e:  # truncated or damaged files
             die(f"cannot decode {src}: {e}")
         first = f", {frames} frames, kept the first" if frames > 1 else ""
@@ -439,6 +487,15 @@ class Comfy:
     def history(self, prompt_id: str) -> dict | None:
         return self.get_json(f"/history/{prompt_id}").get(prompt_id)
 
+    def holds(self, prompt_ids: list[str]) -> bool:
+        """Whether any of these prompts is still running or waiting in ComfyUI's queue."""
+        try:
+            q = self.get_json("/queue", timeout=10)
+        except (OSError, ValueError, ComfyError):
+            return False
+        held = {item[1] for key in ("queue_running", "queue_pending") for item in q.get(key) or [] if len(item) > 1}
+        return any(pid in held for pid in prompt_ids)
+
     def fetch(self, ref: dict) -> bytes:
         query = urllib.parse.urlencode({"filename": ref["filename"], "subfolder": ref.get("subfolder", ""),
                                         "type": ref.get("type", "output")})
@@ -494,6 +551,13 @@ class Library:
         self.run_lock = None
 
     @staticmethod
+    def at(root: Path) -> Library:
+        """A library known by its root alone, for reading its files: a rope-queue job, which makes no rope calls."""
+        lib = Library("", [])
+        lib.root = root
+        return lib
+
+    @staticmethod
     def find(library: str | None = None) -> Library:
         """The library (--library, else $ROPE_LIBRARY, else ~/.local/share/rope): results have nowhere else to go,
         so a missing rope stops the run before any GPU work."""
@@ -505,12 +569,22 @@ class Library:
         return lib
 
     def call(self, *args: str):
-        """Runs `rope --json ARGS` and returns its JSON."""
+        """Runs `rope --json ARGS` and returns its JSON. Ctrl-C waits until rope has answered: a result that rope is
+        recording when it comes is not lost, and the KeyboardInterrupt follows right after."""
+        import threading
+
+        if not self.exe:
+            raise LibraryError("this process makes no rope calls")
         cmd = [self.exe, *self.flags, "--json", *args]
+        held = threading.current_thread() is threading.main_thread()  # the mask is per thread, the handler main's
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if held else None
         try:
             r = subprocess.run(cmd, capture_output=True, encoding="utf-8", timeout=600)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise LibraryError(f"cannot run {self.exe}: {e}") from None
+        finally:
+            if held:
+                signal.pthread_sigmask(signal.SIG_SETMASK, before)
         if r.returncode != 0:
             raise LibraryError(r.stderr.strip().removeprefix("rope: ") or f"{shlex.join(cmd)} failed")
         return json.loads(r.stdout) if r.stdout.strip() else None
@@ -870,6 +944,7 @@ class Job:
     took: float = 0.0  # seconds from its start in ComfyUI to its result
     saved: list[str] = field(default_factory=list)  # where each result went, for the status line
     results: list[Result] = field(default_factory=list)
+    batch: dict | None = None  # the recipe's batch field when the job is one of a rope-queue group; else from the request
 
 
 @dataclass
@@ -920,9 +995,9 @@ def recipe(run: Run, job: Job, flags: list[str], enhanced: str) -> dict:
     """The made field of a result's meta.json in rope; `enhanced` is what the workflow's text_out node showed."""
     inputs = [{k: v for k, v in (("id", i.get("id")), ("uploaded", i.get("uploaded")), ("upload", name)) if v}
               for i, name in zip(job.inputs.records, job.inputs.uploaded)]
+    batch = job.batch or {"index": job.index, "count": job.request.count, "first_seed": job.seed - job.index + 1}
     made = {"by": run.tool.name, "at": iso(run.when), "flags": flags, "prompt": job.request.prompt, "inputs": inputs,
-            "enhanced_prompt": enhanced or None,
-            "batch": {"index": job.index, "count": job.request.count, "first_seed": job.seed - job.index + 1},
+            "enhanced_prompt": enhanced or None, "batch": batch,
             "server": run.server_info or None, "env": run.env, "models": run.models(job.graph.nodes), "code": run.code}
     return {k: v for k, v in made.items() if v is not None}
 
@@ -998,7 +1073,11 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
     deadline = time.monotonic() + timeout  # moved on by every word about one of the jobs: a batch has no total limit
     while pending:
         if time.monotonic() > deadline:
-            die(f"no word from ComfyUI about the job for {timeout}s; it may still be running there")
+            if comfy.holds(list(pending)):  # silent, but still in ComfyUI's queue: slow, not lost
+                status.line(f"  no word from ComfyUI for {timeout}s, but the job is still in its queue; waiting on")
+                deadline = time.monotonic() + timeout
+                continue
+            die(f"no word from ComfyUI about the job for {timeout}s, and it is not in ComfyUI's queue")
         try:
             raw = ws.recv()
         except websocket.WebSocketTimeoutException:
@@ -1009,7 +1088,7 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
                     deadline = time.monotonic() + timeout
             continue
         except websocket.WebSocketConnectionClosedException:
-            die("lost the connection to ComfyUI" + (f":\n{comfy.log_tail()}" if comfy.proc else ""))
+            raise Unreachable("lost the connection to ComfyUI" + (f":\n{comfy.log_tail()}" if comfy.proc else "")) from None
         if not isinstance(raw, str):
             continue  # binary frames carry live previews
         msg = json.loads(raw)
@@ -1026,7 +1105,7 @@ def wait(run: Run, ws, pending: dict[str, Job], total: int) -> None:
         elif kind == "executing" and node in job.graph.labels:
             status.show(job.graph.labels[node])
         elif kind == "progress" and node in job.graph.labels:
-            status.show(job.graph.labels[node], f"{data.get('value')}/{data.get('max')}")
+            status.progress(job.graph.labels[node], data.get("value"), data.get("max"))
         elif kind == "execution_error":
             status.line("")
             die(f"ComfyUI failed in {data.get('node_type')} (node {data.get('node_id')}): "
@@ -1151,6 +1230,9 @@ def run_requests(tool: Tool, requests: Iterable[Settled], opts: Options,
 # ---------------------------------------------------------------- cli
 
 def add_comfy_args(g) -> None:
+    g.add_argument("--no-queue", action="store_true",
+                   help="do the ComfyUI work in this command, as before rope-queue, instead of handing the jobs to the "
+                        "running rope-queue; the options below apply only then")
     g.add_argument("--server", default=SERVER, help=f"ComfyUI address (default {SERVER})")
     g.add_argument("--keep-server", action="store_true", help="when this command starts ComfyUI, leave it running")
     g.add_argument("--no-start", action="store_true", help="fail instead of starting ComfyUI when none is running")
@@ -1162,6 +1244,16 @@ def add_comfy_args(g) -> None:
                    help="compute the image again even when ComfyUI has the result of an identical workflow cached "
                         "(the GPU's results differ slightly from run to run); the loaded models are kept. A replay "
                         "is always fresh")
+
+
+def direct_only(p: argparse.ArgumentParser, a: argparse.Namespace) -> None:
+    """The ComfyUI options belong to the direct path, where the command runs its jobs itself. Given to a command that
+    hands them to rope-queue, whose ComfyUI is its own, they would mean nothing, so the command fails instead."""
+    given = [flag for flag, used in (("--server", a.server != SERVER), ("--keep-server", a.keep_server),
+                                     ("--no-start", a.no_start), ("--comfy-args", bool(a.comfy_args)),
+                                     ("--timeout", a.timeout != TIMEOUT)) if used]
+    if given and not a.no_queue:
+        p.error(f"{', '.join(given)}: only with --no-queue; rope-queue runs the jobs on its own ComfyUI")
 
 
 def check_packages(needed: dict[str, str], script: Path) -> None:
@@ -1195,19 +1287,35 @@ def parse_replay_args(tool: Tool, argv: list[str]) -> argparse.Namespace:
     g = p.add_argument_group("ComfyUI")
     add_comfy_args(g)
     a = p.parse_args(argv)
+    direct_only(p, a)
     a.options = Options(a.server, a.keep_server, a.no_start, shlex.split(a.comfy_args), a.timeout, a.fresh, a.library)
     return a
 
 
 def replay_main(tool: Tool, argv: list[str]) -> int:
-    """A tool's --replay: makes an image or clip in rope again from its record, as parse_replay_args describes."""
+    """A tool's --replay on the direct path: makes an image or clip in rope again from its record, as parse_replay_args
+    describes. Through rope-queue it is comfyqueue.replay_main, built from the same two halves."""
+    return replay_run(tool, replay_prepare(tool, argv))
+
+
+def replay_prepare(tool: Tool, argv: list[str]) -> argparse.Namespace:
+    """--replay up to the GPU work: the options, the item's record from rope, today's request from the recorded flags
+    and what differs from then, printed (replay_setup). The run file then holds the item and its inputs for purge."""
     if tool.replay is None:
         die(f"{tool.name} has no --replay")
     a = parse_replay_args(tool, argv)
     check_packages({"websocket": "websocket-client"}, tool.file)
     sys.stdout.reconfigure(line_buffering=True)
     a.lib = Library.find(a.library)
-    info = a.lib.call("show", a.replay)
+    replay_setup(tool, a, a.lib.call("show", a.replay))
+    a.lib.using([a.info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
+    return a
+
+
+def replay_setup(tool: Tool, a: argparse.Namespace, info: dict) -> None:
+    """Fills `a` from the item's record, `rope show`'s answer (or the same read from the item's files, in a rope-queue
+    job): the recipe, the inputs, today's request from the recorded flags, the seed, the recorded workflow. Prints
+    what differs from then: the workflow today's tool builds, and the model files."""
     made = info["meta"].get("made")
     if not made:
         die(f"{info['short']} has no recipe: rope did not see it being made, so it cannot be replayed")
@@ -1220,7 +1328,6 @@ def replay_main(tool: Tool, argv: list[str]) -> int:
     a.info, a.made, a.prompt, a.flags = info, made, made.get("prompt", ""), made.get("flags", [])
     a.inputs = [{"id": i["id"], "uploaded": i.get("uploaded"), "path": Path(i["path"]), "recorded": i.get("upload")}
                 for i in info["inputs"]]
-    a.lib.using([info["id"], *(i["id"] for i in a.inputs)])  # purge leaves these alone until this run ends
     a.today = tool.replay.parse([*a.flags, "--", *(str(i["path"]) for i in a.inputs), a.prompt])
     a.seed_used = a.seed if a.seed is not None else a.today.seed
     a.recorded = info.get("graph")
@@ -1241,11 +1348,15 @@ def replay_main(tool: Tool, argv: list[str]) -> int:
     hashes = ModelHashes(a.lib.root / ".cache" / "model-sha256.json")
     for line in model_changes(made.get("models") or [], model_files(a.recorded or {}, hashes)):
         print(f"  model: {line}")
+
+
+def replay_run(tool: Tool, a: argparse.Namespace) -> int:
+    """The second half of --replay on the direct path: the workflow printed (--dry-run), or made in a ComfyUI."""
     if a.dry_run:
         nodes = replay_graph(tool, a, [i["recorded"] or "" for i in a.inputs], tool.replay.context_dry)
         print(json.dumps(nodes, indent=2, ensure_ascii=False))
         return 0
-    with_comfy(a.options, lambda comfy: replay_jobs(tool, a, comfy), tool.unit)
+    with_comfy(a.options, lambda comfy: replay_jobs(tool, a, comfy).saved, tool.unit)
     return 0
 
 
@@ -1321,10 +1432,14 @@ def env_changes(then: dict, now: dict, prefix: str = "") -> list[str]:
     return out
 
 
-def replay_jobs(tool: Tool, a: argparse.Namespace, comfy: Comfy) -> list[str]:
+def replay_jobs(tool: Tool, a: argparse.Namespace, comfy: Comfy, status: Status | None = None, keep=None,
+                queued: Callable[[str], None] = lambda pid: None) -> Job:
+    """Makes the replayed item again in this ComfyUI and keeps the result with `keep` (default keep_replay: recorded
+    with the original in rope); `queued` hears the prompt id. Returns the job: what became of it in `saved`, its time
+    in `took`."""
     import websocket
 
-    run = Run(tool, comfy, a.lib, a.options, Status(), partial(keep_replay, tool, a),
+    run = Run(tool, comfy, a.lib, a.options, status or Status(), keep or partial(keep_replay, tool, a),
               ModelHashes(a.lib.root / ".cache" / "model-sha256.json"))
     status = run.status
     tag = fresh_tag("r")
@@ -1351,23 +1466,30 @@ def replay_jobs(tool: Tool, a: argparse.Namespace, comfy: Comfy) -> list[str]:
     ws = websocket.create_connection(f"{comfy.ws_url}?clientId={comfy.client_id}", timeout=15)
     try:
         pending = {comfy.queue(graph): job}
+        queued(next(iter(pending)))
         print(f"replaying {a.info['short']} {a.info['name']}, seed {a.seed_used}")
         try:
             wait(run, ws, pending, 1)
-        except KeyboardInterrupt:
-            status.line("\ncancelling the replay")
+        except BaseException as e:  # Ctrl-C or a failure: either way the prompt must not stay in ComfyUI
+            status.line("\ncancelling the replay" if isinstance(e, KeyboardInterrupt) else "\nstopping the replay")
             comfy.cancel(list(pending))
             raise
     finally:
         ws.close()
-    return job.saved
+    return job
+
+
+def replay_recipe(tool: Tool, a: argparse.Namespace, run: Run, job: Job, enhanced: str) -> dict:
+    """A replay's recipe: the recorded flags with the seed used, or today's flags when today's workflow was sent; the
+    enhanced prompt is the recorded one when the enhancer did not run again."""
+    flags = tool.flags(a.today, a.seed_used) if a.rebuild or a.recorded is None else \
+        [f"--seed={a.seed_used}" if f.startswith("--seed=") else f for f in a.flags]
+    return recipe(run, job, flags, enhanced or a.made.get("enhanced_prompt") or "")
 
 
 def keep_replay(tool: Tool, a: argparse.Namespace, run: Run, job: Job, data: bytes, enhanced: str, suffix: str) -> str:
     """Records a replay's result with the item it replays (rope replayed), and returns what came of it."""
-    flags = tool.flags(a.today, a.seed_used) if a.rebuild or a.recorded is None else \
-        [f"--seed={a.seed_used}" if f.startswith("--seed=") else f for f in a.flags]
-    made = json.dumps(recipe(run, job, flags, enhanced or a.made.get("enhanced_prompt") or ""), ensure_ascii=False)
+    made = json.dumps(replay_recipe(tool, a, run, job, enhanced), ensure_ascii=False)
 
     def args(file: Path, made: Path, graph: Path) -> list[str]:
         return ["replayed", a.info["id"], str(file), f"--made={made}", f"--graph={graph}", f"--repo={HERE}"]

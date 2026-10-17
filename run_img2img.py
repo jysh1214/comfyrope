@@ -2,10 +2,10 @@
 side. A template: copy it, fill in the three numbered parts, and run it from the repo root:
 
     .venv/bin/python run_img2img.py --list    # only print the batch, after checking every request
-    .venv/bin/python run_img2img.py           # make them all, through one ComfyUI
+    .venv/bin/python run_img2img.py           # queue them all in rope-queue, which has to be running
 
 Every result lands in a rope folder named after its combination, with its recipe. README.md, "From Python",
-describes Request, run() and Result."""
+describes Request, run() and Submitted."""
 import dataclasses
 import itertools
 import sys
@@ -36,7 +36,8 @@ TRIGGERS = {  # LoRA name (no strength, no .safetensors) -> the prompt its autho
     "qwen-edit-skin-1.1": "Make the subjects skin details more prominent and natural.",
 }
 
-# The ComfyUI options, as run() takes them: server, keep_server, no_start, comfy_args, timeout, fresh, library.
+# run()'s keyword arguments: fresh (compute again even when ComfyUI has an identical result cached) and library (the
+# rope library; default $ROPE_LIBRARY, else ~/.local/share/rope).
 OPTIONS = {"fresh": False}
 
 
@@ -90,12 +91,14 @@ def main() -> None:
         folders = dict.fromkeys(r.into for r in requests)
         print(f"{len(requests)} requests, {sum(r.count for r in requests)} images, {len(folders)} folders")
         return
-    results = img2img.run(requests, **OPTIONS)
+    submitted = img2img.run(requests, **OPTIONS)
+    queued = [s for s in submitted if s.group is not None]
     print()
-    for r in results:
-        made = f"{r.seconds:.1f}s" if r.created else "cached"
-        print(f"{r.short}  seed {r.seed}  {made:>7}  {r.folder}")
-    print(f"{len(results)} images in {len(dict.fromkeys(r.folder for r in results))} rope folders")
+    if queued:
+        groups = [s.group for s in queued]
+        print(f"{len(queued)} requests queued as groups {min(groups)}–{max(groups)}, {sum(s.count for s in queued)} images")
+    if len(queued) < len(submitted):
+        sys.exit(f"{len(submitted) - len(queued)} requests skipped; see above")
 
 
 if __name__ == "__main__":

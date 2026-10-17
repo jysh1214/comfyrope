@@ -2,10 +2,10 @@
 copy it, fill in the three numbered parts, and run it from the repo root:
 
     .venv/bin/python run_img2vid.py --list    # only print the batch, after checking every request
-    .venv/bin/python run_img2vid.py           # make them all, through one ComfyUI
+    .venv/bin/python run_img2vid.py           # queue them all in rope-queue, which has to be running
 
 Every clip lands in a rope folder named after its combination, with its recipe. README.md, "Making a clip from an
-image", describes Request, run() and Result; run_img2img.py is the same template for images."""
+image", describes Request, run() and Submitted; run_img2img.py is the same template for images."""
 import dataclasses
 import itertools
 import sys
@@ -34,7 +34,8 @@ FPS = [16]  # frames per second; 16 is Wan's own rate, another value changes the
 LORAS: list[str] = []  # name[:strength] as on the command line (.safetensors implied); applied to both models
 TRIGGERS: dict[str, str] = {}  # LoRA name (no strength, no .safetensors) -> the prompt its author asks for
 
-# The options, as run() takes them: server, keep_server, no_start, comfy_args, timeout, fresh, library.
+# run()'s keyword arguments: fresh (compute again even when ComfyUI has an identical result cached) and library (the
+# rope library; default $ROPE_LIBRARY, else ~/.local/share/rope).
 OPTIONS = {"fresh": False}
 
 
@@ -85,12 +86,14 @@ def main() -> None:
         folders = dict.fromkeys(r.into for r in requests)
         print(f"{len(requests)} requests, {sum(r.count for r in requests)} clips, {len(folders)} folders")
         return
-    results = img2vid.run(requests, **OPTIONS)
+    submitted = img2vid.run(requests, **OPTIONS)
+    queued = [s for s in submitted if s.group is not None]
     print()
-    for r in results:
-        made = f"{r.seconds:.1f}s" if r.created else "cached"
-        print(f"{r.short}  seed {r.seed}  {made:>7}  {r.folder}")
-    print(f"{len(results)} clips in {len(dict.fromkeys(r.folder for r in results))} rope folders")
+    if queued:
+        groups = [s.group for s in queued]
+        print(f"{len(queued)} requests queued as groups {min(groups)}–{max(groups)}, {sum(s.count for s in queued)} clips")
+    if len(queued) < len(submitted):
+        sys.exit(f"{len(submitted) - len(queued)} requests skipped; see above")
 
 
 if __name__ == "__main__":

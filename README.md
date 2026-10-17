@@ -11,7 +11,9 @@ Runs Qwen-Image-Edit-2511 and Qwen-Image-2.1 for images and Wan 2.2 for short cl
 | `img2img.py` | Makes a new image from input images and a prompt with Qwen-Image, through ComfyUI's API. Also a Python module, for running many combinations in one go |
 | `img2vid.py` | Makes a short clip from a start image and a prompt with Wan 2.2, the same way; the clips go into rope too |
 | `comfycore.py` | What both scripts are built on: the ComfyUI client, rope, the input conversion and the running of jobs. Not a command |
-| `rope/` | An image library (CLI and GUI, in Rust). It keeps every input and result of `img2img.py` and `img2vid.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
+| `comfyqueue.py` | What both do with rope-queue: queueing a command's jobs, and running one job as the queue's child. Not a command |
+| `comfyconvert.py` | The input conversion as a command, which rope-queue runs for inputs ComfyUI cannot read |
+| `rope/` | An image library (CLI and GUI, in Rust) and `rope-queue`, the work queue that owns ComfyUI and runs the tools' jobs in order. The library keeps every input and result of `img2img.py` and `img2vid.py` with its recipe and lineage, so a result can be made again after its inputs are moved or lost. See [rope/README.md](rope/README.md) |
 
 Run every command from the repo root. Each script finds `ComfyUI/`, `models/` and `.venv/` next to itself, so the repo can live anywhere and be moved without reinstalling.
 
@@ -21,7 +23,7 @@ Run every command from the repo root. Each script finds `ComfyUI/`, `models/` an
 ./install_comfyui.py                                    # ComfyUI, with its own venv
 uv run download_models.py all wan                       # the model files: the image models, and Wan 2.2 for clips
 cargo build --release --manifest-path rope/Cargo.toml   # the rope image library
-./run_comfyui.sh                                        # in another pane: keeps the models loaded between runs
+rope/target/release/rope-queue --repo .                 # in another pane: starts ComfyUI and runs the jobs the tools queue
 ./img2img.py photo.jpg "把背景換成黃昏的海邊"             # "turn the background into a beach at dusk"
 ./img2vid.py photo.jpg "the leaves move in the wind"    # a 5-second clip, into rope as well
 rope/target/release/rope-gui                            # browse the results
@@ -39,9 +41,11 @@ rope/target/release/rope-gui                            # browse the results
 ├── img2img.py           # images + prompt -> new image, through ComfyUI's HTTP API; import it from Python for batches
 ├── img2vid.py           # start image + prompt -> short clip with Wan 2.2, the same way, into rope
 ├── comfycore.py         # what both are built on: the ComfyUI client, rope, the inputs, running jobs; knows no model
+├── comfyqueue.py        # what both do with rope-queue: queueing a command's jobs, and running one job as its child
+├── comfyconvert.py      # the input conversion as a command, for rope-queue's conversion stage
 ├── run_img2img.py       # template for a batch of settings to compare, on img2img.py's Python API
 ├── run_img2vid.py       # the same for clips, on img2vid.py's
-├── rope/                # Rust source of the image library (rope, rope-gui); its data is in ~/.local/share/rope
+├── rope/                # Rust source of the image library (rope, rope-gui) and the work queue (rope-queue); data in ~/.local/share/rope
 ├── models/              # the downloaded models; ComfyUI reads them through extra_model_paths.yaml
 │   ├── diffusion_models/
 │   ├── text_encoders/
@@ -239,6 +243,8 @@ The file lists are `plan_qwen_image_21()`, `plan_edit_2511()`, `plan_wan_22()` a
 
 `install_comfyui.py` writes this file. It only `cd`s into `ComfyUI/` and starts `main.py` with `.venv/bin/python`, adding `--enable-manager` when Manager is installed. Other arguments go to `main.py` unchanged; `./run_comfyui.sh --help` lists them.
 
+`rope-queue` starts ComfyUI through this file itself, so with the queue running there is nothing to start by hand (its `--reserve-vram` and anything after `--` go to ComfyUI). A `--no-queue` command uses a ComfyUI started here, or starts its own.
+
 ### Notes
 
 - **The GPU also drives the desktop.** The screen may stall during the tens of seconds a model loads; if the whole desktop goes black, try `--reserve-vram 2`.
@@ -281,19 +287,22 @@ Give it images and a prompt and it makes a new image, with no UI. It flattens Co
 ./img2img.py photo.jpg "..." --dry-run                                # only print the API workflow JSON
 ```
 
+Every command hands its images to `rope-queue`, the work queue in `rope/` ([rope/README.md](rope/README.md#rope-queue)): it prints what it queued and returns at once, and rope-queue, which owns ComfyUI, makes the images in order and puts each into rope. Start it once, in another pane, and keep issuing commands. `--no-queue` does the work in the command itself, as before the queue; the ComfyUI options apply only then.
+
 With `.venv` activated, `python img2img.py` works the same as `./img2img.py`. To try many settings in one go, [import it from Python](#from-python).
 
-`img2img.py` holds only what is about its models: the requests, the workflows and the replay. The ComfyUI client, rope, the input conversion and the running of jobs are `comfycore.py` beside it, which knows no model; `img2vid.py` is built on it the same way. Both need it next to themselves.
+`img2img.py` holds only what is about its models: the requests, the workflows and the replay. The ComfyUI client, rope, the input conversion and the running of jobs are `comfycore.py` beside it, which knows no model, and what both tools do with rope-queue is `comfyqueue.py`; `img2vid.py` is built on them the same way. Both need the two next to themselves.
 
 Images come first and the prompt last; the first image sets the output size. With several images, refer to them in the prompt as 圖1, 圖2 or image 1, image 2, in command-line order. Prompts can be Chinese or English and work best as instructions that describe only the change: "replace … with …", "remove …", "add …".
 
 ### How it works
 
-1. Each input is kept in rope first (see below), then checked: single-frame PNG, JPEG and WebP files are used as they are; anything else is converted to PNG here.
-2. It checks for a ComfyUI at `--server` (default http://127.0.0.1:8188). If there is none, it starts one with `run_comfyui.sh` and stops it when the command ends.
-3. It uploads the inputs to ComfyUI's `input/img2img/`, named after a hash of their content, so a rerun with the same image reuses the same upload.
-4. It builds the workflow for `-m`, queues it, and follows loading, encoding and sampling over the websocket.
-5. Each result goes into rope with its recipe.
+1. The request is checked: the settings, that every input is a format the converter reads, and that the model and LoRA files of its workflow are there. What fails is reported with its fix, and the request is skipped.
+2. It is handed to rope-queue, which keeps the inputs in rope (see below) and queues one job per image with its settings pinned. The command prints `queued #123–#172 (group 40) …` and returns.
+3. rope-queue converts inputs ComfyUI cannot read to PNG (single-frame PNG, JPEG and WebP go as they are), and runs the jobs in order, each as `img2img.py --job`: the inputs are uploaded to ComfyUI's `input/img2img/`, named after a hash of their content, so a rerun with the same image reuses the same upload; the workflow for `-m` is built and queued, and loading, encoding and sampling are followed over the websocket.
+4. Each result goes into rope with its recipe.
+
+With `--no-queue`, the command does steps 3 and 4 itself, against the ComfyUI at `--server` (default http://127.0.0.1:8188); if none answers there, it starts one with `run_comfyui.sh` and stops it when the command ends.
 
 ### Where results go
 
@@ -399,16 +408,17 @@ ComfyUI:
 
 | Option | Description |
 |---|---|
+| `--no-queue` | Do the ComfyUI work in this command instead of handing the jobs to rope-queue; the four options below apply only then |
 | `--server URL` | ComfyUI's address |
 | `--keep-server` | Leave a ComfyUI this command started running, so the next command skips the model load |
 | `--no-start` | Fail when no ComfyUI is running instead of starting one |
 | `--comfy-args "..."` | Extra flags for a ComfyUI this command starts, e.g. `"--reserve-vram 2"` |
 | `--timeout N` | Give up when ComfyUI has said nothing about the jobs for N seconds; default 1800. A batch has no total limit: every progress message starts the count again |
-| `--fresh` | Compute the image again even when ComfyUI has cached the result of an identical workflow (same inputs, settings and seed); the loaded models are kept. GPU results differ slightly from run to run, so a fresh run is a new image |
+| `--fresh` | Compute the image again even when ComfyUI has cached the result of an identical workflow (same inputs, settings and seed); the loaded models are kept. GPU results differ slightly from run to run, so a fresh run is a new image. With or without the queue |
 
 ### From Python
 
-`img2img.py` is also a module. `import img2img`, build a `Request` per combination to try, and `run()` makes them all in one go: through one ComfyUI (started once if none is running), each input uploaded once, and every result in rope with its recipe, so the combinations can be compared side by side in `rope-gui`. A `Request` has a field per option above, with the same names and defaults, and `dataclasses.replace` makes variants of one:
+`img2img.py` is also a module. `import img2img`, build a `Request` per combination to try, and `run()` hands them all to rope-queue: one group of jobs per request, and every result in rope with its recipe, so the combinations can be compared side by side in `rope-gui`. `run()` returns as soon as the jobs are queued; rope-queue's screen, `rope-queue ls` and `rope-gui` show what becomes of them. A `Request` has a field per option above, with the same names and defaults, and `dataclasses.replace` makes variants of one:
 
 ```python
 # the skin LoRAs at a few strengths, with the 4- and 8-step Lightning LoRA, on one seed
@@ -422,32 +432,33 @@ for lightning, strength in itertools.product(["4", "8"], [0.8, 1.0, 1.2]):
     requests.append(dataclasses.replace(base, lightning=lightning, lora=[(skin, strength)], tags=[f"L{lightning}", f"skin {strength}"]))
 requests.append(dataclasses.replace(base, lightning="8", lora=[(skin, 1.0), (fix, 0.8)], tags=["L8", "skin 1", "fix 0.8"]))
 
-for r in img2img.run(requests):
-    print(r.short, r.folder, r.request.lightning, r.request.lora, r.request.tags)
+for s in img2img.run(requests):
+    print(s.group, s.jobs, s.request.lightning, s.request.lora, s.request.tags)
 ```
 
-`run_img2img.py` is this as a template: a `BASE` request, the settings to vary, and a `batch()` that yields the combinations, each in a rope folder named after it. Copy it, fill in the three numbered parts, and run it from the repo root with `.venv/bin/python run_img2img.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); `--list` prints the batch after checking every request, without making anything. From elsewhere, put the repo on `PYTHONPATH`.
+`run_img2img.py` is this as a template: a `BASE` request, the settings to vary, and a `batch()` that yields the combinations, each in a rope folder named after it. Copy it, fill in the three numbered parts, and run it from the repo root with `.venv/bin/python run_img2img.py` (see [setup_venv.sh](#python-environment-setup_venvsh)); `--list` prints the batch after checking every request, without queueing anything. From elsewhere, put the repo on `PYTHONPATH`.
 
 | Name | What it is |
 |---|---|
 | `Request(images, prompt, ...)` | `images`: paths or `@ID`s (a single one may be a plain string), `prompt`, then the options as fields: `model`, `count`, `seed`, `negative`, `steps`, `cfg`, `lora` (`[("style.safetensors", 0.8)]`, or `["style.safetensors:0.8"]` as on the command line), `lightning`, `resolution`, `enhance`, `into`, `tags`, `note`. `request.settled()` is a copy with the defaults filled in |
-| `run(requests, **options)` | Makes every request's images and returns a `Result` per image, the requests in order. The keyword arguments are the ComfyUI options and `library`, with the same names and defaults: `server`, `keep_server`, `no_start`, `comfy_args`, `timeout`, `fresh`, `library` |
-| `Result` | `id` and `short` (rope's id), `path`, `folder`, `created` (False when rope had these bytes already), `width`, `height`, `seconds`, `enhanced_prompt`, `seed`, `index` (which of the request's `count` images), and `request`, the settled Request it came from |
-| `workflow(request, seed=0)` | The API workflow `run()` would send, as `--dry-run` prints it |
-| `Error` | What a failed run raises. A bad `Request` is a `ValueError` instead, raised before anything runs |
+| `run(requests, **options)` | Queues every request's images in rope-queue and returns a `Submitted` per request, in order. The keyword arguments are `fresh` and `library`, as on the command line |
+| `Submitted` | `group` (its id in rope-queue) and `jobs` (the first and the last job id) once queued, with `count` and `first_seed`; `skipped`, the reasons it was not queued, each with its fix; and `request`, the settled Request it came from |
+| `workflow(request, seed=0)` | The API workflow a job would send, as `--dry-run` prints it |
+| `Error` | What a failed submission raises: rope-queue not built, or not running. A bad `Request` is a `ValueError` instead, raised before anything is sent |
 
-- Every request is checked before anything runs, so one typo fails the whole batch at once, before any input goes into rope or any GPU work.
-- It prints what the command line prints. A failure in one job stops the run and drops the jobs still queued; what was made before stays in rope. Ctrl-C does the same.
-- Fix the seed when comparing settings: a request without one draws its own random seed.
+- Every request is checked before anything is sent, so one typo fails the whole batch at once. A request whose input the converter cannot read, or whose model or LoRA file ComfyUI lacks, is printed with its fix and skipped; the others are queued.
+- It prints what the command line prints: one `queued` line per request. What then happens to the jobs is rope-queue's to show, and a failed job never stops the others.
+- Fix the seed when comparing settings: a request without one draws its own random seed when it is queued.
 - Identical requests (same inputs, settings and seed) are answered from ComfyUI's cache, as on the command line; `fresh=True` computes them again.
+- There is no direct path from Python: a batch needs rope-queue running. `--no-queue` is the command line's.
 
 ### Tips
 
-- **Keep ComfyUI running between runs.** Start it with `run_comfyui.sh` in another zellij pane and `img2img.py` uses it, loading the models only once. A command that starts ComfyUI itself reloads about 30 GB of models every time.
+- **rope-queue keeps ComfyUI running between jobs.** Start it once in another zellij pane and keep issuing commands; the models load once. With `--no-queue`, start ComfyUI with `run_comfyui.sh` in a pane first, or the command starts one itself and reloads about 30 GB of models every time.
 - **The same command twice gives the same image at once.** ComfyUI caches results: an identical workflow (same inputs, settings and seed) is answered from the cache, not computed again, and rope takes the bytes it already has. Change the seed for a new image, or add `--fresh` to compute the same settings again.
-- **Ctrl-C cancels.** Queued jobs are dropped and the running one is interrupted; a ComfyUI the command started is stopped too.
+- **Ctrl-C in rope-queue** interrupts the running job, which goes back to the head of the line, and stops ComfyUI with the daemon; `rope-queue cancel 123` or `cancel g40` drops a job or a whole group. With `--no-queue`, Ctrl-C in the command drops its queued jobs and interrupts the running one; a ComfyUI the command started is stopped too.
 - **Result PNGs carry their workflow.** Drop one on the ComfyUI page to see the workflow as a node graph, a good way into the UI.
-- **A missing model file comes with the fix.** For example, without the 8-step LoRA, ComfyUI rejects the workflow before running it, and the script prints the `download_models.py` command that fetches it.
+- **A missing model file comes with the fix.** For example, without the 8-step LoRA, the command finds the file missing before queueing anything, prints the `download_models.py` command that fetches it, and skips the request.
 
 ### Further reading
 
@@ -472,7 +483,7 @@ The clip keeps the start image's aspect ratio, scaled so that its long side is `
 
 **Where clips go.** Into rope, like images: each clip with its recipe and the workflow ComfyUI ran, its first frame as its thumbnail, and its start image as its upstream, so `--into`, `--tag` and `--note` work as for `img2img.py`, and `rope-gui` plays it (see [rope/README.md](rope/README.md)). Names are `<time>_<image>_<model>_s<seed>`, as `img2img.py`'s. ComfyUI keeps its own copy of each clip under `ComfyUI/output/img2vid/`.
 
-**Speed.** On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step LoRAs (the first one longer, with 30 GB of models to load; `./run_comfyui.sh` in another pane keeps them loaded between runs) and about 9 minutes without.
+**Speed.** On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step LoRAs (the first one longer, with 30 GB of models to load; rope-queue keeps them loaded between jobs) and about 9 minutes without.
 
 ### Options
 
@@ -488,9 +499,9 @@ The clip keeps the start image's aspect ratio, scaled so that its long side is `
 | `--negative TEXT` | The negative prompt (default: Wan's own, in Chinese); has an effect only when cfg is above 1 |
 | `--into FOLDER`, `--tag TAG`, `--note TEXT` | The rope folder for the clips (made if there is none; default: unfiled), tags and a note, as `img2img.py`'s |
 | `--replay ID` | Make a rope clip again from its record, as `img2img.py --replay` does for an image, except that the new clip is compared byte for byte; `--replay ID --help` lists its own options |
-| `--library DIR`, the ComfyUI options | As `img2img.py`'s |
+| `--library DIR`, `--no-queue` and the ComfyUI options | As `img2img.py`'s |
 
-From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, **options)` returns a `Result` per clip, as `img2img.run()` does, with `id`, `path`, `folder`, `width`, `height` and `seconds`. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, fps, LoRAs) and a `batch()`; each combination's clips go into a rope folder named after it, so `--list` and a run work the same way.
+From Python it works like `img2img`: `import img2vid`, a `Request` per clip (its fields are the options above), and `run(requests, **options)` queues them in rope-queue and returns a `Submitted` per request, as `img2img.run()` does. `run_img2vid.py` is the batch template for clips, as `run_img2img.py` is for images: a `BASE` request, the settings to vary (Lightning, shift, fps, LoRAs) and a `batch()`; each combination's clips go into a rope folder named after it, so `--list` and a run work the same way.
 
 **Not there yet.** Only the 14B image-to-video pair runs; the 5B model and text-to-video are left to ComfyUI's templates.
 

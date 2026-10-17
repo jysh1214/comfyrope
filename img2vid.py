@@ -24,7 +24,7 @@ motion: what moves, and how the camera moves.
 
 Each clip goes into rope like an image, with its recipe, the workflow ComfyUI ran, its first frame for the
 thumbnail, and its start image as its upstream; rope-gui plays it. --into, --tag, --note and --library are
-img2img.py's, and so is the Python side: import img2vid, build a Request per clip, and run() them in one go.
+img2img.py's, and so is the Python side: import img2vid, build a Request per clip, and run() queues them all.
 Names are <time>_<image>_<model>_s<seed>, as img2img.py's. ComfyUI keeps its own copy of each clip under
 ComfyUI/output/img2vid/.
 
@@ -43,11 +43,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Library, Options, Replay, Result,
-                       Tool, add_comfy_args, add_loras, check_packages, exact, link, parse_lora, prepare, replay_main,
-                       rope_ref, run_requests, upload_name)
+from comfycore import (FETCH, SERVER, TIMEOUT, UPLOAD_SUBFOLDER, Error, Graph, Inputs, Library, Options, Replay, Tool,
+                       add_comfy_args, add_loras, check_packages, direct_only, exact, link, parse_lora, prepare, rope_ref,
+                       run_requests, upload_name)
+from comfyqueue import Submitted, job_main, replay_main, submit
 
-__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Result", "run", "workflow"]
+__all__ = ["SERVER", "TIMEOUT", "Error", "Request", "Submitted", "run", "workflow"]
 
 # Model files as ComfyUI's template names them (download_models.py wan fetches them).
 WAN22 = {
@@ -234,18 +235,12 @@ TOOL = Tool(Path(__file__), PACKAGES, build=lambda r, inputs, seed, context: bui
             flags=video_flags, describe=describe, unit="clip", replay=REPLAY)
 
 
-def run(requests: Request | Iterable[Request], *, server: str = SERVER, keep_server: bool = False,
-        no_start: bool = False, comfy_args: str | Iterable[str] = (), timeout: int = TIMEOUT, fresh: bool = False,
-        library: str | None = None) -> list[Result]:
-    """Makes the clips of every request, all through one ComfyUI, each into rope with its recipe, as img2img.run()
-    does for images: every request is checked first, a failure raises Error and drops the jobs still queued, Ctrl-C
-    does the same, and the keyword arguments are the ComfyUI and --library options with the same defaults. Returns
-    a Result per clip, the requests in order and each request's clips in seed order; `width` and `height` are the
-    clip's as rope measured it."""
-    flags = shlex.split(comfy_args) if isinstance(comfy_args, str) else list(comfy_args)
-    opts = Options(server, keep_server, no_start, flags, timeout, fresh, library)
-    wanted = [requests] if isinstance(requests, Request) else requests
-    return run_requests(TOOL, wanted, opts)
+def run(requests: Request | Iterable[Request], *, fresh: bool = False, library: str | None = None) -> list[Submitted]:
+    """Hands the clips of every request to rope-queue, one group of `count` jobs per request, as img2img.run() does
+    for images: every request is checked first, a request that fails a check is printed with its fix and skipped,
+    nothing waits for the jobs, and the keyword arguments are `fresh` and `library`. Returns a Submitted per request,
+    in order: its group and job ids, or why it was skipped."""
+    return submit(TOOL, [requests] if isinstance(requests, Request) else requests, fresh=fresh, library=library)
 
 
 # ---------------------------------------------------------------- cli
@@ -281,6 +276,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_comfy_args(g)
     g.add_argument("--dry-run", action="store_true", help="print the API workflow JSON and stop; nothing is uploaded or run")
     a = p.parse_args(argv)
+    direct_only(p, a)
     try:
         a.request = Request([a.image], a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
                             steps=a.steps, cfg=a.cfg, shift=a.shift, lora=a.lora, lightning=a.lightning,
@@ -306,6 +302,8 @@ def workflow(request: Request, seed: int = 0, *, fresh: bool = False, library: s
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--job"] and len(argv) == 2:  # rope-queue's child: one job, see comfyqueue.job_main
+        return job_main(TOOL, Path(argv[1]))
     if any(arg == "--replay" or arg.startswith("--replay=") for arg in argv):
         return replay_main(TOOL, argv)
     a = parse_args(argv)
@@ -314,8 +312,11 @@ def main(argv: list[str]) -> int:
         seed = a.request.seed if a.request.seed is not None else 0
         print(json.dumps(workflow(a.request, seed, fresh=a.fresh, library=a.library), indent=2, ensure_ascii=False))
         return 0
-    run(a.request, **vars(a.options))
-    return 0
+    if a.no_queue:  # the direct path: this command runs the jobs itself
+        run_requests(TOOL, [a.request], a.options)
+        return 0
+    submitted = submit(TOOL, [a.request], fresh=a.fresh, library=a.library)
+    return 1 if any(s.skipped for s in submitted) else 0
 
 
 if __name__ == "__main__":

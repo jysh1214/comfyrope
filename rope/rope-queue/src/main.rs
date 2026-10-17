@@ -70,6 +70,8 @@ enum Cmd {
         #[arg(long)]
         wait: bool,
     },
+    /// Says whether a daemon runs, with its library and its ComfyUI
+    Status,
     /// Lists the jobs (from the files when no daemon runs)
     Ls,
     /// Prints a job's log
@@ -119,6 +121,20 @@ fn run() -> Result<ExitCode> {
     match cli.cmd {
         None => start_daemon(cli, lib, adopt),
         Some(Cmd::Add { wait }) => add(json, wait),
+        Some(Cmd::Status) => {
+            let v = socket::call(&Request::Ping)?;
+            emit(json, &v, || {
+                let comfy = &v["comfy"];
+                let version = comfy["version"].as_str().map(|s| format!(" {s}")).unwrap_or_default();
+                println!(
+                    "rope-queue is running (pid {}), library {}; ComfyUI{version} {}{}",
+                    v["pid"],
+                    v["library"].as_str().unwrap_or("?"),
+                    if comfy["up"] == true { "up" } else { "starting" },
+                    if v["paused"] == true { "; paused" } else { "" }
+                );
+            })
+        }
         Some(Cmd::Ls) => ls(&lib, json),
         Some(Cmd::Log { id }) => {
             let path = queue::log_path(&lib, id);
