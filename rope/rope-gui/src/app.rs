@@ -36,6 +36,9 @@ struct Detail {
     note_conflict: bool,
     name: String,
     new_tag: String,
+    /// The full command, what Copy command copies, with the folder it was built for: the recipe panel shows it,
+    /// and builds it again only when the image moves.
+    command: Option<(Option<String>, String)>,
 }
 
 /// Work a dialog asks for, done once the dialog is drawn.
@@ -370,6 +373,7 @@ impl App {
             note_mtime: mtime,
             note_conflict: false,
             new_tag: String::new(),
+            command: None,
         });
     }
 
@@ -1190,6 +1194,7 @@ impl App {
         let m = &d.meta;
         let catalog = &self.model.as_ref().expect("loaded").catalog;
         let entry = catalog.entry(&id);
+        let folder = entry.folder.as_ref().map(|f| catalog.folder_path(f));
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -1274,7 +1279,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label("Folder");
-            let shown = entry.folder.as_ref().map(|f| catalog.folder_path(f)).unwrap_or_else(|| "/ (unfiled)".into());
+            let shown = folder.clone().unwrap_or_else(|| "/ (unfiled)".into());
             if ui.add(egui::Button::new(shown).truncate()).on_hover_text("move to another folder (M)").clicked() {
                 actions.push(Action::Dialog(Dialog::move_to(vec![id.clone()])));
             }
@@ -1371,22 +1376,58 @@ impl App {
         if let Some(made) = &m.made {
             ui.add_space(6.0);
             ui.label(RichText::new("Recipe").strong());
-            ui.label(RichText::new(repro::shell_join(&m.flags())).monospace().small());
+            // the sections a job has on the Queue page: the command, the prompt, the flags, when
+            section(ui, "Command");
+            if d.command.as_ref().map(|(f, _)| f) != Some(&folder) {
+                let text = repro::command_argv(&self.lib, m, folder.as_deref())
+                    .map(|argv| repro::shell_join(&argv))
+                    .unwrap_or_else(|e| format!("{e:#}"));
+                d.command = Some((folder.clone(), text));
+            }
+            let command = d.command.as_ref().map(|(_, c)| c.as_str()).unwrap_or_default();
+            ui.add(egui::Label::new(RichText::new(command).monospace().small()).wrap());
             if let Some(p) = made.get("prompt").and_then(|v| v.as_str()) {
-                ui.add(egui::Label::new(p).wrap());
-                let save = ui
-                    .small_button("Save prompt")
-                    .on_hover_text("keep it on the Prompts page, under this image's name");
-                if save.clicked() {
-                    actions.push(Action::AddPrompt { title: Some(d.name.clone()), text: p.to_owned() });
-                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    section(ui, "Prompt");
+                    let save = ui
+                        .small_button("Save prompt")
+                        .on_hover_text("keep it on the Prompts page, under this image's name");
+                    if save.clicked() {
+                        actions.push(Action::AddPrompt { title: Some(d.name.clone()), text: p.to_owned() });
+                    }
+                });
+                ui.add(egui::Label::new(RichText::new(p).small()).wrap());
             }
             if let Some(p) = made.get("enhanced_prompt").and_then(|v| v.as_str()).filter(|p| !p.is_empty()) {
                 ui.label(RichText::new("enhanced prompt").weak().small());
                 ui.add(egui::Label::new(RichText::new(p).small()).wrap());
             }
-            if let Some(s) = made.get("server").and_then(|v| v.as_str()) {
-                ui.label(RichText::new(s).weak().small());
+            let flags = m.flags();
+            if !flags.is_empty() {
+                ui.add_space(6.0);
+                section(ui, "Flags");
+                ui.add(egui::Label::new(RichText::new(repro::shell_join(&flags)).monospace().small()).wrap());
+            }
+            let mut when = Vec::new();
+            if let Some(at) = made.get("at").and_then(|v| v.as_str()) {
+                when.push(format!("made {}", at.get(..16).unwrap_or(at).replace('T', " ")));
+            }
+            if let (Some(i), Some(n)) = (made["batch"]["index"].as_u64(), made["batch"]["count"].as_u64())
+                && n > 1
+            {
+                when.push(format!("{i} of {n} in its batch"));
+            }
+            let server = made.get("server").and_then(|v| v.as_str());
+            if !when.is_empty() || server.is_some() {
+                ui.add_space(6.0);
+                section(ui, "When");
+                if !when.is_empty() {
+                    ui.label(RichText::new(when.join("  ·  ")).weak().small());
+                }
+                if let Some(s) = server {
+                    ui.add(egui::Label::new(RichText::new(s).weak().small()).wrap());
+                }
             }
         }
         if !m.replays.is_empty() {
@@ -2007,6 +2048,11 @@ pub(crate) fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, ho
     }
 }
 
+/// A heading inside the right panel: Command, Prompt, Flags, When; the same under an image's recipe and for a job.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).strong().small());
+}
+
 /// A clickable star for marking a favorite.
 fn star_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
@@ -2524,10 +2570,22 @@ mod tests {
         };
         let result = store::add(&lib, &png(dir.path(), "result.png", 2), &made).unwrap().sha;
 
+        lib.set_repo(dir.path()).unwrap();
         let ctx = egui::Context::default();
         let mut app = App::new(&ctx, lib.clone(), Some(result[..8].to_owned()));
         frames_until(&ctx, &mut app, |a| a.detail.as_ref().is_some_and(|d| d.id == result));
         assert_eq!(app.view, View::Unfiled, "opening an image shows its folder");
+        // the recipe shows the full command, built once for the image's folder
+        frames_until(&ctx, &mut app, |_| true);
+        let command = app.detail.as_ref().unwrap().command.clone().expect("the panel built the command");
+        assert_eq!(command.0, None);
+        assert!(
+            command.1.contains("img2img.py --library=")
+                && command.1.contains(" --model=2511 --seed=1 -- @")
+                && command.1.contains("把背景換成海邊"),
+            "{}",
+            command.1
+        );
         // the grid thumbnail and the preview get decoded and cached
         frames_until(&ctx, &mut app, |a| {
             [thumbs::PREVIEW, thumbs::GRID].iter().all(|&size| a.thumbs.ready(&Key { id: result.clone(), size }))

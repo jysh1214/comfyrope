@@ -3,7 +3,7 @@
 //! a daemon adds the live part over its socket: the stage and progress of the running job, pause, ComfyUI's state.
 //! The controls are the daemon's: cancel, retry, pause, resume, clear. Submitting is the tools' business.
 
-use super::{Action, App};
+use super::{Action, App, section};
 use crate::thumbs::{self, Key, Source};
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Vec2};
 use rope_core::hash::short;
@@ -852,10 +852,6 @@ fn column(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> egui
         ui.set_max_width(width);
         add(ui);
     });
-}
-
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).strong().small());
 }
 
 fn state_text(ui: &egui::Ui, state: State) -> RichText {
