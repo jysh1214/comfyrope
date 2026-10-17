@@ -30,7 +30,7 @@ A **job is one image or one clip**: one ComfyUI prompt. A command with `-n 50` b
 | Bad requests | Reported and skipped at submission, with the fix; the rest of the submission is queued. A failed job never holds the queue up |
 | Stopping | Ctrl-C interrupts the running job at once; it goes back to the head of the queue with its id |
 | Python environment | The repo's `.venv`, never uv's. Checked when rope-queue starts |
-| rope-gui | Shows the queue with live progress. Submitting from the GUI comes later |
+| rope-gui | A Queue page: groups and jobs with live progress, and the daemon's cancel, retry, pause, resume and clear. Submitting from the GUI comes later |
 
 ## Pieces
 
@@ -236,7 +236,16 @@ Groups are collapsed by default; Enter expands one into its jobs. `l` opens the 
 
 ## rope-gui
 
-A Queue page beside Prompts: groups and jobs read through `rope_core::queue`, refreshed on journal lines like everything else; a thread on the socket for progress, reconnecting when the daemon comes back; cancel and retry over the socket. Thumbnails come free, since inputs and results are rope ids. Submitting from a selected image with a saved prompt is the natural next step; it needs the tool's validation, so the GUI would run `img2img.py …` itself. Later.
+Built 2026-10-17, after the Python side. The socket client and the protocol types live in `rope_core::queue::{socket, protocol}`, so the GUI needs nothing of the daemon's crate; rope-queue keeps the listening half and re-exports the client.
+
+The Queue page is opened from a button at the right end of the top bar's Import row (the sidebar stays the library's), showing how many jobs are to do and a dot while one runs. Its data has two sources that land in one list, `Model.jobs`:
+
+- The library's `queue/`, through `rope_core::queue::scan`, read at start and again on every journal line with `op: "queue"` (a group submitted, a job finished, a retry, a clear). This is why the page works with no daemon.
+- The daemon's socket, from a thread of its own: `ping` first, to check the daemon serves this library (the socket is one per user; a daemon for another library is reported and the controls refuse), then `ls` for the jobs, pause and ComfyUI's state, then `subscribe` for `state`, `stage`, `progress` and `paused` events. A `state` event replaces that job in the list; the stage and progress of the running job live only in the GUI. The thread reconnects two seconds after the daemon goes away.
+
+Layout, as decided: group sections newest first, each with the command line, counts, destination, submission time and a progress bar; one flat table row per job (input thumbnail and name, `#id`, state, seed, result thumbnail with name and folder, or the error, or the running stage, and the time it took). The right panel shows the selected job or group: command with Copy, inputs, prompt, pinned flags, destination, times, result with Open in library, the job's log tail (reread every second while it runs), Cancel and Retry. Controls on the page are cancel, retry, pause, resume and Clear finished; stop and reload stay in the terminal. Finished groups stay until Clear finished. Double-click opens a done job's result in the library; Delete cancels the selection, Esc lets it go.
+
+Submitting from a selected image with a saved prompt is the natural next step; it needs the tool's validation, so the GUI would run `img2img.py …` itself. Later.
 
 ## Python side
 

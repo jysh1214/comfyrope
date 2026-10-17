@@ -6,16 +6,15 @@ mod comfy;
 mod convert;
 mod daemon;
 mod import;
-mod protocol;
 mod runner;
 mod screen;
 mod socket;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use protocol::{Request, Submission};
 use rope_core::Library;
 use rope_core::hash::short;
+use rope_core::queue::protocol::{Request, Submission};
 use rope_core::queue::{self, Job, State};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

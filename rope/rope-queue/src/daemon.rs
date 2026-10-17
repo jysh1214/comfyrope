@@ -4,7 +4,6 @@
 use crate::comfy::{self, Http, Process};
 use crate::convert::{self, Converted};
 use crate::import;
-use crate::protocol::{self, ChildEvent, Event, Request, ResultEvent, Submission, SubmitRequest};
 use crate::runner::{self, Tools};
 use crate::screen::{RowData, RowKind, Screen, View};
 use crate::socket::{self, Responder};
@@ -12,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rope_core::hash::short;
 use rope_core::library::Lock;
+use rope_core::queue::protocol::{self, ChildEvent, Event, Request, ResultEvent, Submission, SubmitRequest};
 use rope_core::queue::{self, Input, Job, NewGroup, State, Submitted};
 use rope_core::store::{self, NewImage};
 use rope_core::{Library, time};

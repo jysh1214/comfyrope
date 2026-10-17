@@ -2,8 +2,8 @@
 //! Its environment is built, not inherited, so the shell that started the daemon leaks nothing into a job.
 
 use crate::daemon::{ChildMsg, Msg};
-use crate::protocol::ChildEvent;
 use anyhow::{Context, Result, bail};
+use rope_core::queue::protocol::ChildEvent;
 use rope_core::queue::{self, Job};
 use rope_core::{Library, time};
 use std::fs::{File, OpenOptions};

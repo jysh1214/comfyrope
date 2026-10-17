@@ -1,9 +1,9 @@
 //! Putting a job's result into rope, in process through rope-core: what `rope add` and `rope replayed` do for
 //! the direct path.
 
-use crate::protocol::{Kind, ResultEvent};
 use anyhow::{Context, Result};
 use rope_core::Library;
+use rope_core::queue::protocol::{Kind, ResultEvent};
 use rope_core::queue::{self, Job};
 use rope_core::store::{self, NewImage};
 use serde_json::{Value, json};

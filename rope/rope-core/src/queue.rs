@@ -20,6 +20,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+pub mod protocol;
+pub mod socket;
+
 pub const FORMAT: u32 = 1;
 
 /// Where a job is in its life.

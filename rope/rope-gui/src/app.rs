@@ -3,6 +3,7 @@
 //! changes made elsewhere through the journal.
 
 mod prompts;
+mod queue;
 mod viewer;
 
 use crate::model::{Model, View};
@@ -155,6 +156,8 @@ enum Action {
         before: Option<String>,
     },
     CopyText(String),
+    /// The Queue page's own: selecting, cancel, retry, pause, resume, clear.
+    Queue(queue::Act),
 }
 
 pub struct App {
@@ -191,6 +194,8 @@ pub struct App {
     /// The prompt being dragged to another place in the list, and where the cards are, to see where it lands.
     prompt_drag: Option<String>,
     prompt_rects: Vec<(String, Rect)>,
+    /// The Queue page: what the daemon says over its socket, and what is selected there.
+    queue: queue::Live,
 }
 
 impl App {
@@ -204,6 +209,7 @@ impl App {
             let _ = tx.send(Model::load(&l));
             c.request_repaint();
         });
+        let queue = queue::Live::start(&ctx, lib.root().to_owned());
         let (tx, changes) = channel();
         let c = ctx.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -244,6 +250,7 @@ impl App {
             prompt: None,
             prompt_drag: None,
             prompt_rects: Vec::new(),
+            queue,
         };
         match watcher {
             Ok(w) => app._watcher = Some(w),
@@ -263,6 +270,7 @@ impl App {
     // ---------------------------------------------------------------- keeping up
 
     fn poll(&mut self) {
+        self.queue_poll();
         if let Some(rx) = &self.loading
             && let Ok(result) = rx.try_recv()
         {
@@ -393,6 +401,7 @@ impl App {
                 self.refresh();
             }
             Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
+            Action::Queue(act) => self.queue_act(act, ctx)?,
             Action::Select(id, pick) => {
                 self.picked_folders.clear();
                 match pick {
@@ -960,6 +969,9 @@ impl App {
         if self.view == View::Prompts {
             return self.prompt_list(ui, actions);
         }
+        if self.view == View::Queue {
+            return self.queue_page(ui, actions);
+        }
         let n = self.visible.len();
         if n == 0 {
             ui.centered_and_justified(|ui| {
@@ -1143,6 +1155,9 @@ impl App {
     fn details(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if self.view == View::Prompts {
             return self.prompt_editor(ui, actions);
+        }
+        if self.view == View::Queue {
+            return self.queue_details(ui, actions);
         }
         if self.selected.len() > 1 {
             return self.bulk(ui, actions);
@@ -1662,6 +1677,24 @@ impl App {
         if self.dialog.is_some() || ctx.wants_keyboard_input() {
             return;
         }
+        if self.view == View::Queue {
+            // on the Queue page Esc lets the selected job or group go; the rest is the mouse's
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                actions.push(Action::Queue(queue::Act::Select(None)));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+                match self.queue.selected {
+                    Some(queue::Sel::Job(id)) => {
+                        actions.push(Action::Queue(queue::Act::Cancel { jobs: vec![id], groups: vec![] }))
+                    }
+                    Some(queue::Sel::Group(g)) => {
+                        actions.push(Action::Queue(queue::Act::Cancel { jobs: vec![], groups: vec![g] }))
+                    }
+                    None => {}
+                }
+            }
+            return;
+        }
         if self.view == View::Prompts {
             // on the Prompts page the keys act on the prompt in the editor
             let (del, esc, copy) = ctx.input(|i| {
@@ -1771,6 +1804,7 @@ impl App {
                 format!("Made from {}", model.items.get(id).map_or_else(|| short(id).to_owned(), |i| i.name.clone()))
             }
             View::Prompts => "Prompts".into(),
+            View::Queue => "Queue".into(),
         }
     }
 }
@@ -1858,9 +1892,23 @@ impl App {
                 ui.label(RichText::new(self.title()).strong());
                 let count = match self.view {
                     View::Prompts => format!("{} prompt(s)", self.prompts_shown().len()),
+                    View::Queue => format!("{} job(s)", self.model().jobs.len()),
                     _ => format!("{} image(s)", self.visible.len()),
                 };
                 ui.label(RichText::new(count).weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // rope-queue's page, at the far right: how many jobs are still to do, with a mark while one runs
+                    let open = self.model().jobs.iter().filter(|j| !j.is_terminal()).count();
+                    let mark = if self.queue.connected && self.queue.running.is_some() { "● " } else { "" };
+                    let text = format!("{mark}Queue  ({open})");
+                    if ui
+                        .selectable_label(self.view == View::Queue, text)
+                        .on_hover_text("what rope-queue is doing")
+                        .clicked()
+                    {
+                        actions.push(Action::View(View::Queue));
+                    }
+                });
             });
         });
         egui::SidePanel::left("folders")
@@ -2132,6 +2180,85 @@ mod tests {
         frames_until(&ctx, &mut app, |a| player(a).is_some_and(|(shown, _, _)| shown == Some(3)));
         press(&ctx, &mut app, egui::Key::Escape);
         assert!(app.viewer.is_none());
+    }
+
+    /// The Queue page shows the library's jobs by group with or without a daemon, selecting shows the details,
+    /// and Clear finished works on the library when no daemon serves it.
+    #[test]
+    fn the_queue_page_lists_jobs_by_group() {
+        use crate::app::queue::{Act, Sel};
+        use rope_core::queue::{self, Input, NewGroup, State};
+
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let photo = png(dir.path(), "photo.png", 3);
+        let id = store::add(&lib, &photo, &NewImage { via: "import".into(), ..Default::default() }).unwrap().sha;
+        let flag = |s: &str| vec!["--model=2511".to_owned(), format!("--seed={s}")];
+        let new = NewGroup {
+            tool: "img2img.py".into(),
+            prompt: "a red square".into(),
+            inputs: vec![Input { id: id.clone(), name: "photo".into(), rendition: None }],
+            into: Some("tests".into()),
+            flags: vec![flag("1"), flag("2")],
+            submitted: queue::Submitted {
+                argv: ["img2img.py", "photo.png", "a red square", "-n", "2"].map(String::from).into(),
+                cwd: "/x".into(),
+                at: String::new(),
+            },
+            ..Default::default()
+        };
+        let jobs = queue::submit(&lib, &new).unwrap();
+        let (first, second) = (jobs[0].id, jobs[1].id);
+        // the states go the way the daemon takes them
+        for state in [State::Ready, State::Running, State::Importing, State::Done] {
+            queue::update(&lib, first, |j| {
+                j.state = state;
+                if state == State::Done {
+                    j.result = Some(
+                        json!({"id": id, "short": &id[..12], "name": "photo_s1", "folder": "tests", "seconds": 3.5}),
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        queue::update(&lib, second, |j| {
+            j.state = State::Failed;
+            j.error = Some("ComfyUI lacks models/loras/x.safetensors".into());
+            Ok(())
+        })
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some());
+        assert_eq!(app.model().jobs.iter().map(|j| j.id).collect::<Vec<_>>(), [first, second]);
+
+        // the page draws, then each kind of selection
+        app.apply(Action::View(View::Queue), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.view == View::Queue);
+        assert_eq!(app.title(), "Queue");
+        app.apply(Action::Queue(Act::Select(Some(Sel::Job(second)))), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.queue.selected == Some(Sel::Job(second)));
+        app.queue.show_log = true;
+        frames_until(&ctx, &mut app, |a| a.queue.log.as_ref().is_some_and(|(j, _, _)| *j == second));
+        app.apply(Action::Queue(Act::Select(Some(Sel::Group(jobs[0].group.id)))), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| matches!(a.queue.selected, Some(Sel::Group(_))));
+        press(&ctx, &mut app, egui::Key::Escape);
+        assert_eq!(app.queue.selected, None);
+
+        // the daemon's controls want a daemon for this library; clearing does not
+        assert!(!app.queue.connected);
+        app.apply(Action::Queue(Act::Cancel { jobs: vec![second], groups: vec![] }), Some(&ctx));
+        assert!(app.status.as_ref().is_some_and(|(t, err, _)| *err && t.contains("not running")), "{:?}", app.status);
+        app.apply(Action::Queue(Act::Clear), Some(&ctx));
+        assert!(app.model().jobs.is_empty(), "{:?}", app.model().jobs.iter().map(|j| j.id).collect::<Vec<_>>());
+        assert!(queue::list(&lib).unwrap().is_empty());
+
+        // a group submitted now arrives through the journal
+        let more = queue::submit(&lib, &new).unwrap();
+        frames_until(&ctx, &mut app, |a| a.model().jobs.len() == 2);
+        assert_eq!(app.model().jobs[0].id, more[0].id);
     }
 
     /// Draws frames until `done` holds, or fails after a few seconds.

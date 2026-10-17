@@ -4,6 +4,7 @@
 use anyhow::Result;
 use rope_core::meta::VideoInfo;
 use rope_core::prompts::Prompts;
+use rope_core::queue::{self, Job};
 use rope_core::store::RAW_SUFFIXES;
 use rope_core::{Catalog, Library, Meta, journal, store};
 use serde_json::Value;
@@ -21,6 +22,8 @@ pub enum View {
     MadeFrom(String),
     /// The Prompts page: not images at all.
     Prompts,
+    /// The Queue page: rope-queue's jobs.
+    Queue,
 }
 
 /// The part of an image's meta.json the grid and the lineage need; the details panel reads the whole file.
@@ -76,6 +79,9 @@ pub struct Model {
     pub items: HashMap<String, Item>,
     pub catalog: Catalog,
     pub prompts: Prompts,
+    /// rope-queue's jobs, by id. A group submitted and a job finished reach the journal, so the list is current
+    /// with or without a daemon; what happens in between comes over the daemon's socket, into the same list.
+    pub jobs: Vec<Job>,
     pub children: HashMap<String, Vec<String>>,
     /// Goes up with every change, so views know to recompute.
     pub version: u64,
@@ -99,6 +105,7 @@ impl Model {
             items,
             catalog: Catalog::load(lib)?,
             prompts: Prompts::load(lib)?,
+            jobs: jobs(lib),
             children: HashMap::new(),
             version: 1,
             offset,
@@ -136,9 +143,17 @@ impl Model {
         }
         self.catalog = Catalog::load(lib)?;
         self.prompts = Prompts::load(lib)?;
+        if events.iter().any(|e| e["op"] == "queue") {
+            self.jobs = jobs(lib);
+        }
         self.link();
         self.version += 1;
         Ok(changed)
+    }
+
+    /// The job with this id.
+    pub fn job(&self, id: u64) -> Option<&Job> {
+        self.jobs.iter().find(|j| j.id == id)
     }
 
     fn link(&mut self) {
@@ -186,7 +201,7 @@ impl Model {
                     View::Tag(t) => self.shown(i) && e.is_some_and(|e| e.tags.contains(t)),
                     View::Trash => !i.kept && self.catalog.is_trashed(&i.id),
                     View::MadeFrom(id) => self.shown(i) && i.upstream.contains(id),
-                    View::Prompts => false,
+                    View::Prompts | View::Queue => false,
                 };
                 in_view && (search.is_empty() || i.haystack.contains(&search))
             })
@@ -216,6 +231,14 @@ impl Model {
         (self.counts, self.shown, self.trashed, self.paths) = (counts, shown, trashed, paths);
         self.tags = self.catalog.tags();
     }
+}
+
+/// The queue's jobs by id. A job file that cannot be read is left out: the queue is rope-queue's to keep, and
+/// `rope check` reports it.
+fn jobs(lib: &Library) -> Vec<Job> {
+    let mut jobs = queue::scan(lib).map(|(jobs, _)| jobs).unwrap_or_default();
+    jobs.sort_by_key(|j| j.id);
+    jobs
 }
 
 #[cfg(test)]

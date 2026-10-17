@@ -1,8 +1,9 @@
-//! What goes over the socket, one JSON object per line: a request, its answer, and for a subscription the events
-//! that follow. The Python tools and rope-gui speak this; the client subcommands wrap it. Also the events the
-//! child that runs a job writes on its stdout.
+//! What goes over rope-queue's socket, one JSON object per line: a request, its answer, and for a subscription the
+//! events that follow. The daemon answers it; the client subcommands, the Python tools (through them) and rope-gui
+//! speak it. Also the events the child that runs a job writes on its stdout. Here in rope-core so that the GUI
+//! needs nothing of the daemon's crate.
 
-use rope_core::queue::Job;
+use super::Job;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
