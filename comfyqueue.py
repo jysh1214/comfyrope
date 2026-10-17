@@ -1,4 +1,4 @@
-"""What the tools do with rope-queue, the work queue in rope/ (rope/rope-queue/DESIGN.md, "Python side"). A command
+"""What the tools do with rope-queue, the work queue in rope/. A command
 hands its requests to the running daemon and comes back at once: submit(), one group of jobs per request. The daemon
 owns ComfyUI, brings the inputs and the results into rope, and runs each job as a child of the tool, `img2img.py
 --job DIR`: job_main(), which makes exactly one image or clip, writes it into the job's out/ with its recipe, and
@@ -224,7 +224,8 @@ def replay_flags(argv: list[str]) -> list[str]:
 def job_main(tool: Tool, jobdir: Path) -> int:
     """rope-queue's child, `TOOL --job DIR`: makes the one image or clip of the job in DIR, against the ComfyUI the
     daemon names in $COMFYUI_SERVER as $COMFYUI_CLIENT_ID, writes it into DIR/out/ with its recipe and workflow, and
-    speaks the events of DESIGN.md on stdout; everything else printed goes to stderr, the job's log. It changes
+    speaks JSON events on stdout (one object per line, the ChildEvent of rope-core's queue/protocol.rs: stage,
+    progress, comfy, result, error, end); everything else printed goes to stderr, the job's log. It changes
     nothing in the library: the daemon imports what it delivers. Exit codes: 0 done; 1 failed, an `error` event
     saying why; 75 ComfyUI unreachable, the job goes back in line; 130 interrupted by the daemon."""
     events = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
