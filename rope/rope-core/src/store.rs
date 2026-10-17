@@ -9,7 +9,7 @@ use crate::hash::{self, short};
 use crate::meta::{self, ImageInfo, Meta, Source};
 use crate::{Library, atomic, journal, repro, time, video};
 use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -553,6 +553,76 @@ pub fn set_name(lib: &Library, sha: &str, name: &str) -> Result<()> {
     meta.name = name.to_owned();
     atomic::write(&dir.join("meta.json"), &meta.to_json())?;
     journal::append(lib, "name", &[sha.to_owned()])
+}
+
+/// `made` with its `env` object stored in envs/ and replaced by that snapshot's id, as every recipe is kept.
+pub fn with_env_stored(lib: &Library, mut made: Value) -> Result<Value> {
+    if made.get("env").is_some_and(Value::is_object) {
+        let id = add_env(lib, &made["env"])?;
+        made["env"] = json!(id);
+    }
+    Ok(made)
+}
+
+/// What `rope add` answers about an image just added: its id, path, name, size and folder path, and whether
+/// the bytes were new (`created`) or came back from the trash (`restored`).
+pub fn added_json(lib: &Library, meta: &Meta, created: bool, restored: bool) -> Result<Value> {
+    let catalog = Catalog::load(lib)?;
+    Ok(json!({
+        "id": meta.sha256, "short": meta.short(), "path": image_path(lib, meta), "name": meta.name,
+        "created": created, "restored": restored, "pixels": meta.image.pixels,
+        "width": meta.image.width, "height": meta.image.height,
+        "folder": catalog.entry(&meta.sha256).folder.map(|f| catalog.folder_path(&f)),
+    }))
+}
+
+/// Records that image `sha` was replayed and `file` came out, with `made` its recipe and `graph` its workflow:
+/// an image is compared pixel by pixel, a clip byte by byte (its encoder's output is not decoded here). A result
+/// that differs is added to the library beside the original, named "... (replay)", in the original's folder.
+/// Answers the record: `result` (identical or differs), `compared`, the differences, `id` of the new image if
+/// any, and `path` of the image the result is.
+pub fn replayed(lib: &Library, sha: &str, file: &Path, made: Value, graph: Option<Value>) -> Result<Value> {
+    let orig = load(lib, sha)?;
+    let bytes = orig.is_clip();
+    let cmp = if bytes {
+        let same = hash::sha256_file(file)? == sha;
+        let (max_diff, differing) = if same { (0, 0.0) } else { (255, 1.0) };
+        Comparison { identical: same, same_size: same, max_diff, differing }
+    } else {
+        compare_pixels(&image_path(lib, &orig), file)?
+    };
+    let mut made = with_env_stored(lib, made)?;
+    let mut record = json!({
+        "at": time::now(),
+        "result": if cmp.identical { "identical" } else { "differs" },
+        "compared": if bytes { "bytes" } else { "pixels" },
+        "env": made.get("env"), "code": made.get("code"),
+    });
+    if !bytes {
+        record["same_size"] = json!(cmp.same_size);
+        record["max_diff"] = json!(cmp.max_diff);
+        record["differing"] = json!(cmp.differing);
+    }
+    if !cmp.identical {
+        made["replay_of"] = json!(sha);
+        let catalog = Catalog::load(lib)?;
+        let new = NewImage {
+            name: Some(format!("{} (replay)", orig.name)),
+            made: Some(made),
+            graph,
+            via: orig.tool().to_owned(),
+            folder: Some(catalog.entry(sha).folder),
+            ..Default::default()
+        };
+        let added = add(lib, file, &new)?;
+        record["id"] = json!(added.sha);
+    }
+    add_replay(lib, sha, record.clone())?;
+    record["path"] = match record.get("id").and_then(Value::as_str) {
+        Some(new) => json!(image_path(lib, &load(lib, new)?)),
+        None => json!(image_path(lib, &orig)),
+    };
+    Ok(record)
 }
 
 /// Adds a replay record to image `sha`.

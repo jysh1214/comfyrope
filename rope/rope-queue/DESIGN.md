@@ -1,6 +1,6 @@
 # rope-queue: a work queue for ComfyUI jobs
 
-Draft for review, 2026-10-17. Nothing in it is built yet.
+Written 2026-10-17. rope-core's `queue.rs` and the `rope-queue` crate follow it; the Python side (`--job`, submitting, `comfyconvert.py`) is next. Where the code settled a detail the draft left open, this file says what the code does.
 
 ## What it is for
 
@@ -73,6 +73,7 @@ rope-core and the rope CLI gain no dependency: the CLI is started by Python for 
 - `journal.jsonl` gets a line when a group is submitted and when a job reaches `done`, `failed` or `cancelled`: `op: "queue"`, an empty `ids`, and the job and state in fields of their own. The `ids` field must hold only image hashes, since rope-gui loads each of them. Progress never goes into the journal: the GUI rereads the catalog on every journal line.
 - The socket is `$XDG_RUNTIME_DIR/rope-queue.sock`, mode 0600. It is on tmpfs, so a reboot leaves no stale socket behind. One daemon per machine, serving the default library or `--library`.
 - `queue/` is state, not content: the README's rsync recipe excludes it. A restored old `queue/` would otherwise bring finished jobs back as queued.
+- `queue/rope-queue.log` is what the daemon said, one line per event with the time: the screen's notes, kept. `queue/convert/<id>/` is scratch space for a conversion in progress, removed when it is done.
 
 ### job.json
 
@@ -142,7 +143,7 @@ Only the daemon changes a state. `retry` gives a new id, so FIFO stays a sort by
 - The child is `<repo>/.venv/bin/python -E -u <repo>/<tool> --job <jobdir>`, cwd the repo. Its environment is built, not inherited: `PATH`, `HOME`, `LANG`, `XDG_*`, `ROPE_LIBRARY`, `COMFYUI_SERVER`, `COMFYUI_CLIENT_ID` (new for every attempt). No `VIRTUAL_ENV`, no `PYTHONPATH`, and `-E` drops any `PYTHON*` that got through. stdin is `/dev/null`.
 - stdout carries events (below), stderr the tool's human output. Both go to the job's `log`; the events also update the job and the screen.
 - On a `result` event the daemon imports in process: `store::add` with a `NewImage` holding `made`, `graph`, `name`, `via` the tool, `folder` the job's `into`, its tags and note, and `file_inputs`, so unfiled inputs follow the result into the folder as today. A replay runs the comparison that is `replayed()` in the CLI now, moved into rope-core. `out/` is removed after a successful import. If rope cannot take the result (disk full, a broken catalog), the job becomes `failed` with its files kept in `out/`, and the queue **pauses**: the next job would fail the same way. The retry key on such a job imports again without running anything.
-- Exit codes: 0 done. 1 failed, `error` being the last `error` event or stderr line. 75 ComfyUI unreachable: the job goes back to `ready` and the daemon checks ComfyUI. 130 interrupted by the daemon's own SIGINT: back to `ready`. The daemon trusts its own checks over the code: a child that died with 1 while ComfyUI is gone counts as 75.
+- Exit codes: 0 done. 1 failed, `error` being the last `error` event or stderr line. 75 ComfyUI unreachable: the job goes back to `ready` and the daemon checks ComfyUI. 130 interrupted by the daemon's own SIGINT: back to `ready`. The daemon trusts its own checks over the code: a child that died with 1 while ComfyUI is gone counts as 75, and a job that comes back with 75 twice while ComfyUI answers the daemon fails instead, since then the tool is wrong, not ComfyUI. A child killed by a signal records the signal as a negative exit, as Python does.
 - A failed job never holds the queue up: the next `ready` job runs. The queue pauses itself in two cases only, because every following job would fail the same way: rope cannot take a result (below), or ComfyUI has died twice (below).
 - ComfyUI health: its process is polled every tick and `/system_stats` every 5 s. When it has died, the running job goes back to `ready` and ComfyUI is started again, once. A second death within 10 minutes pauses the queue and shows the log's tail: a restart loop on the card that drives the display is not acceptable.
 - A child that ends without an `end` event (killed, out of memory) leaves its prompt in ComfyUI. The daemon reads `GET /queue`, deletes the entries whose `client_id` is the child's, and interrupts the running one if it is among them.
@@ -161,7 +162,7 @@ To stop without interrupting anything, `pause` first and stop when the running j
 
 - `pause`: finish the running job, start none; `resume` goes on. ComfyUI stays up.
 - VRAM is handed back when the queue is paused, and when it has been empty for a minute (a grace period, so a burst of commands does not reload between them): `POST /free` with `unload_models` and `free_memory`. ComfyUI moves the models out of VRAM but keeps them in RAM, so the next job brings them back over PCIe in seconds, not from NVMe. `free_memory` also drops ComfyUI's cache of finished results, so a job run again after a release is computed again. Whether the memory then really reaches the desktop under comfy-aimdo's dynamic VRAM is checked with `nvidia-smi` once this runs.
-- `reload`: after the running job ends, the daemon `exec`s its own binary again, on the main thread, handing over the ComfyUI pid in an environment variable. ComfyUI stays the same child and its models stay loaded. This is how a rebuilt rope-queue is picked up without a ComfyUI restart.
+- `reload`: after the running job ends, the daemon `exec`s its own binary again, on the main thread, handing over the ComfyUI pid and log in `ROPE_QUEUE_ADOPT=<pid>:<log>`. ComfyUI stays the same child and its models stay loaded. This is how a rebuilt rope-queue is picked up without a ComfyUI restart; a binary rebuilt underneath the running one is found at its plain path.
 
 ## Submitting
 
@@ -170,10 +171,13 @@ Python does everything that needs a Request: `settled()`, the seed base (drawn n
 ```
 rope-queue --json add   # on stdin:
 {"tool": "img2img.py",
- "requests": [{"flags": [...], "prompt": "...", "images": ["photo.jpg", "@9f4ad8"], "count": 50,
-               "into": "...", "tags": [], "note": null, "fresh": false}],
+ "requests": [{"flags": [["--model=2511", "--seed=42", ...], ["--model=2511", "--seed=43", ...]],
+               "prompt": "...", "images": ["photo.jpg", "@9f4ad8"], "first_seed": 42,
+               "into": "...", "tags": [], "note": null, "fresh": false, "replay": null}],
  "submitted": {"argv": [...], "cwd": "..."}}
 ```
+
+`flags` holds one list per job, the job's own seed inside, so the request's `count` is its length. `images` are relative to `cwd` unless absolute; `@ID` names an image in rope. `replay` names the image a replay runs again. The answer is `{"ok": true, "groups": [{"group": 40, "jobs": [123, 172]}, {"skipped": "why"}, ...]}`, one entry per request in order. `add --wait` then stays subscribed and answers every job of the submission once all have finished.
 
 The daemon, under the queue lock:
 
@@ -191,7 +195,7 @@ Only two things fail the whole submission: the socket does not answer ("rope-que
 Single-frame PNG, JPEG and WebP go to ComfyUI as they are; everything else becomes an upright, single-frame, 8-bit sRGB PNG, exactly as `prepare_inputs()` does today. The stage is rope-queue's; the pixels are Python's:
 
 - For each distinct input id without a rendition, a worker thread runs `<repo>/.venv/bin/python -E -u comfyconvert.py <library file> <out dir> --json`. The answer is `{"as_is": true}`, or `{"file": "….png", "steps": "HEIF, converted to PNG", "libs": {...}}`.
-- The daemon calls `store::add_rendition` and records the id in every job that uses the input. Jobs move to `ready` as their inputs are done.
+- The daemon calls `store::add_rendition` and records the id in every job that uses the input. Jobs move to `ready` as their inputs are done. A rendition kept with the image from an earlier conversion is used again without running the converter. Two conversions run at a time.
 - A format the converter does not know is caught at submission (above) with "convert it to PNG first": that is the user's job, as ffmpeg is for clips. A conversion that still fails here (a damaged file) fails the jobs that use the input, with the converter's message, and the queue goes on.
 - A RAW used by 50 jobs is developed once; today every run converts it again. The stage runs while the GPU is busy with earlier jobs.
 
@@ -210,7 +214,7 @@ One JSON object per stdout line:
 | `error` | `message` | the job's `error` |
 | `end` | `seconds` | the job's timing |
 
-Anything else on stdout is a protocol error and fails the job.
+Anything else on stdout is a protocol error and fails the job. The child also writes the `result` object to `out/result.json`: a result delivered to a daemon that then died is imported when the next daemon starts, and `retry` on a job that failed at import imports it again.
 
 ## Screen
 
@@ -244,7 +248,9 @@ To be worked out next, together with `run_*.py`. The shape is fixed by the above
 
 ## Client commands
 
-The same binary with a subcommand is a client of the running daemon, over the socket: `add` (what the Python tools call), `ls`, `log ID`, `cancel ID|GROUP`, `retry ID|GROUP`, `pause`, `resume`, `stop`, `reload`. Every one takes `--json`, as the rope CLI does. `ls` works without a daemon too, reading the files, so jobs left behind by a stopped daemon can be seen; `clear` removes finished jobs and their dirs and is the one other command that works without a daemon.
+The same binary with a subcommand is a client of the running daemon, over the socket: `add [--wait]` (what the Python tools call), `ls`, `log ID`, `cancel 123 g40` and `retry 123 g40` (plain numbers are jobs, `g40` is group 40), `pause`, `resume`, `stop`, `reload`, `clear`. Every one takes `--json`, as the rope CLI does. `ls`, `log` and `clear` work without a daemon too, reading the files, so jobs left behind by a stopped daemon can be seen and cleaned up.
+
+The daemon itself takes `--library DIR`, `--repo DIR` (default: where a tool run last recorded it), `--server HOST:PORT` (default 127.0.0.1:8188), `--reserve-vram GB` (default 2; 0 leaves ComfyUI's default), `--job-timeout MIN` (default 30), `--converter FILE` (default `comfyconvert.py` in the repo), `--no-screen`, and after `--` anything for ComfyUI. Without a terminal it prints one line per change instead of drawing the screen.
 
 ## Open points
 

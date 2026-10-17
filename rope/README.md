@@ -237,6 +237,12 @@ When things go wrong:
 - **rope cannot take a result** (a full disk, say): the GPU work is not lost. The PNG goes to `rescue/` in the library (or the system's temp folder when even that fails) with its `made.json` and `graph.json`, next to a `bring-in.sh` that hands it to rope once rope works again. `rope check` lists what is still waiting in `rescue/`.
 - **Several runs at once:** each run records the images it uses in `runs/<pid>.json` and keeps that file locked while it lasts, so `rope purge` leaves those alone and deletes anything else. A file left by a crashed run is removed once nothing holds its lock.
 
+## rope-queue
+
+`rope-queue` is the work queue for ComfyUI jobs, a binary of its own in this workspace (`cargo build` makes it too). Started alone it is the daemon: it starts ComfyUI in place of `./run_comfyui.sh`, takes jobs from `img2img.py` and `img2vid.py`, runs them one at a time in order and puts every result into the library, with a screen that shows the queue. Ctrl-C interrupts the running job, which goes back to the head of the line, and stops ComfyUI with the daemon. With a subcommand it talks to the running daemon: `ls`, `log ID`, `cancel 123 g40`, `retry 123 g40`, `pause`, `resume`, `stop`, `reload`, `clear`, each with `--json`.
+
+Its data lives in the library under `queue/`: one directory per job with its `job.json` and `log`, the id counters in `queue.json`, and ComfyUI's logs under `comfyui/`. `rope purge` leaves the inputs of unfinished jobs alone, as it leaves those of a running `img2img.py`. The design, with the job and event formats, is in `rope-queue/DESIGN.md`.
+
 ## Reproducing an image
 
 Copy repro and `rope repro ID` both give `img2img.py --replay ID`, or `img2vid.py --replay ID` for a clip: the tool that made the item, by its recipe. Each item's `repro.sh` runs the same command. It finds the library from its own location and the repo from the library's `REPO` file, so moving the inputs, the repo or the library does not break it.

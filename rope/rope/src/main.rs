@@ -349,13 +349,13 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Add { file, made, graph, name, into, tags, note, file_inputs, via, repo } => {
             set_repo(&lib, repo.as_deref())?;
-            let made = with_env_stored(&lib, read_json(&made)?)?;
+            let made = store::with_env_stored(&lib, read_json(&made)?)?;
             let graph = graph.map(|g| read_json(&g)).transpose()?;
             let folder = into_folder(&lib, into.as_deref())?;
             let new = NewImage { name, made: Some(made), graph, via, folder, tags, note, file_inputs };
             let added = store::add(&lib, &file, &new)?;
             let meta = store::load(&lib, &added.sha)?;
-            emit(json, added_json(&lib, &meta, added.created, added.restored)?, || {
+            emit(json, store::added_json(&lib, &meta, added.created, added.restored)?, || {
                 println!("{}  {}", meta.short(), store::image_path(&lib, &meta).display())
             })
         }
@@ -518,7 +518,7 @@ fn import(lib: &Library, json: bool, paths: &[PathBuf], tree: Option<&str>, new:
             };
             println!("{}  {what:<8} {}", meta.short(), f.display());
         }
-        let mut v = added_json(lib, &meta, added.created, added.restored)?;
+        let mut v = store::added_json(lib, &meta, added.created, added.restored)?;
         v["source"] = json!(std::path::absolute(f)?);
         out.push(v);
     }
@@ -565,62 +565,20 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 fn replayed(lib: &Library, json: bool, id: &str, file: &Path, made: &Path, graph: Option<&Path>) -> Result<()> {
     let sha = store::resolve(lib, id)?;
     let orig = store::load(lib, &sha)?;
-    // an image is compared pixel by pixel; a clip byte by byte, since its encoder's output is not decoded here
-    let bytes = orig.is_clip();
-    let cmp = if bytes {
-        let same = rope_core::hash::sha256_file(file)? == sha;
-        let (max_diff, differing) = if same { (0, 0.0) } else { (255, 1.0) };
-        store::Comparison { identical: same, same_size: same, max_diff, differing }
-    } else {
-        store::compare_pixels(&store::image_path(lib, &orig), file)?
-    };
-    let mut made = with_env_stored(lib, read_json(made)?)?;
-    let mut record = json!({
-        "at": time::now(),
-        "result": if cmp.identical { "identical" } else { "differs" },
-        "compared": if bytes { "bytes" } else { "pixels" },
-        "env": made.get("env"), "code": made.get("code"),
-    });
-    if !bytes {
-        record["same_size"] = json!(cmp.same_size);
-        record["max_diff"] = json!(cmp.max_diff);
-        record["differing"] = json!(cmp.differing);
-    }
-    if !cmp.identical {
-        made["replay_of"] = json!(sha);
-        let catalog = Catalog::load(lib)?;
-        let new = NewImage {
-            name: Some(format!("{} (replay)", orig.name)),
-            made: Some(made),
-            graph: graph.map(read_json).transpose()?,
-            via: orig.tool().to_owned(),
-            folder: Some(catalog.entry(&sha).folder),
-            ..Default::default()
-        };
-        let added = store::add(lib, file, &new)?;
-        record["id"] = json!(added.sha);
-    }
-    store::add_replay(lib, &sha, record.clone())?;
-    record["path"] = match record.get("id").and_then(Value::as_str) {
-        Some(new) => json!(store::image_path(lib, &store::load(lib, new)?)),
-        None => json!(store::image_path(lib, &orig)),
-    };
+    let record = store::replayed(lib, &sha, file, read_json(made)?, graph.map(read_json).transpose()?)?;
+    let bytes = record["compared"] == "bytes";
     emit(json, record.clone(), || {
-        if cmp.identical {
+        let kept = short(record["id"].as_str().unwrap_or("?"));
+        if record["result"] == "identical" {
             println!("identical to {}{}", orig.short(), if bytes { ", byte for byte" } else { "" });
         } else if bytes {
-            println!(
-                "differs from {} (other bytes); kept as {}",
-                orig.short(),
-                short(record["id"].as_str().unwrap_or("?"))
-            );
+            println!("differs from {} (other bytes); kept as {kept}", orig.short());
         } else {
             println!(
-                "differs from {}: max difference {} of 255 in {:.2}% of the pixels; kept as {}",
+                "differs from {}: max difference {} of 255 in {:.2}% of the pixels; kept as {kept}",
                 orig.short(),
-                cmp.max_diff,
-                cmp.differing * 100.0,
-                short(record["id"].as_str().unwrap_or("?"))
+                record["max_diff"],
+                record["differing"].as_f64().unwrap_or(0.0) * 100.0
             );
         }
     })
@@ -1139,16 +1097,6 @@ fn emit(json: bool, v: Value, text: impl FnOnce()) -> Result<()> {
     Ok(())
 }
 
-fn added_json(lib: &Library, meta: &Meta, created: bool, restored: bool) -> Result<Value> {
-    let catalog = Catalog::load(lib)?;
-    Ok(json!({
-        "id": meta.sha256, "short": meta.short(), "path": store::image_path(lib, meta), "name": meta.name,
-        "created": created, "restored": restored, "pixels": meta.image.pixels,
-        "width": meta.image.width, "height": meta.image.height,
-        "folder": catalog.entry(&meta.sha256).folder.map(|f| catalog.folder_path(&f)),
-    }))
-}
-
 fn summary_json(lib: &Library, catalog: &Catalog, m: &Meta) -> Value {
     let e = catalog.entry(&m.sha256);
     json!({"id": m.sha256, "short": m.short(), "name": m.name, "added": m.added, "path": store::image_path(lib, m),
@@ -1184,14 +1132,6 @@ fn read_json(path: &Path) -> Result<Value> {
 }
 
 /// A recipe whose `env` is a whole snapshot gets it stored once in envs/, and refers to it by id.
-fn with_env_stored(lib: &Library, mut made: Value) -> Result<Value> {
-    if made.get("env").is_some_and(Value::is_object) {
-        let id = store::add_env(lib, &made["env"])?;
-        made["env"] = json!(id);
-    }
-    Ok(made)
-}
-
 fn set_repo(lib: &Library, repo: Option<&Path>) -> Result<()> {
     match repo {
         Some(r) => lib.set_repo(r),
