@@ -3,13 +3,29 @@
 
 use crate::{Library, time};
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Appends one line. The file is opened and closed for each line, so a file watcher sees every change.
 pub fn append(lib: &Library, op: &str, ids: &[String]) -> Result<()> {
-    let mut line = json!({"at": time::now(), "op": op, "ids": ids}).to_string();
+    append_with(lib, op, ids, Value::Null)
+}
+
+/// Appends one line with more than `at`, `op` and `ids`: the entries of `fields`, a JSON object, follow them. For
+/// changes that are not about images, such as the queue's; `ids` must hold only image hashes, since the GUI
+/// loads every one of them.
+pub fn append_with(lib: &Library, op: &str, ids: &[String], fields: Value) -> Result<()> {
+    let mut line = Map::new();
+    line.insert("at".to_owned(), json!(time::now()));
+    line.insert("op".to_owned(), json!(op));
+    line.insert("ids".to_owned(), json!(ids));
+    if let Value::Object(fields) = fields {
+        for (k, v) in fields {
+            line.entry(k).or_insert(v);
+        }
+    }
+    let mut line = Value::Object(line).to_string();
     line.push('\n');
     let path = lib.journal_path();
     OpenOptions::new()

@@ -78,6 +78,7 @@ To keep it elsewhere, make it with `rope init DIR`, then point at it with `--lib
 │   └── uploaded/        # for HEIC, RAW and the like: the PNG actually uploaded in its place
 ├── tmp/                 # items being assembled, renamed into items/ when complete
 ├── runs/<pid>.json      # the images each img2img.py run in progress uses; the run keeps it locked
+├── queue/               # rope-queue's jobs: queue.json counts ids, jobs/<id>/ holds each job, comfyui/ its logs
 ├── rescue/              # results img2img.py could not hand to rope, waiting for rope add
 └── .cache/thumbs/       # GUI thumbnails; safe to delete
 ```
@@ -270,7 +271,7 @@ rope deletes only what is in the library: never the originals, or ComfyUI's `inp
 The library holds the only copy of inputs whose originals are gone, so back it up. Image files never change once written, which keeps incremental backups cheap:
 
 ```bash
-rsync -a --exclude .cache/ ~/.local/share/rope/ /backup/rope/
+rsync -a --exclude .cache/ --exclude queue/ ~/.local/share/rope/ /backup/rope/
 rope check --hash            # check every file still matches its hash
 ```
 

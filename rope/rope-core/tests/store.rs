@@ -1,3 +1,5 @@
+use rope_core::purge::Holder;
+use rope_core::queue;
 use rope_core::store::{self, NewImage};
 use rope_core::{Catalog, Library, purge};
 use serde_json::json;
@@ -180,12 +182,36 @@ fn purge_leaves_the_inputs_of_a_running_img2img_alone_and_deletes_the_rest() {
     held.lock().unwrap();
     let out = purge::purge(&lib, &[a.clone(), b.clone()], false).unwrap();
     assert_eq!(out.deleted, std::slice::from_ref(&b));
-    assert_eq!(out.in_use, [(a.clone(), 777)]);
+    assert_eq!(out.in_use, [(a.clone(), Holder::Run(777))]);
     assert!(lib.item_dir(&a).exists() && !lib.item_dir(&b).exists());
     drop(held);
     let out = purge::purge(&lib, std::slice::from_ref(&a), false).unwrap();
     assert_eq!((out.deleted, out.in_use), (vec![a.clone()], vec![]));
     assert!(!path.exists(), "the file of the run that ended is gone");
+}
+
+#[test]
+fn purge_leaves_the_inputs_of_an_unfinished_job_in_the_queue_alone() {
+    let (dir, lib) = library();
+    let a = import(&lib, &png(dir.path(), "a.png", 1));
+    let b = import(&lib, &png(dir.path(), "b.png", 2));
+    let group = queue::NewGroup {
+        tool: "img2img.py".into(),
+        inputs: vec![queue::Input { id: a.clone(), name: "a".into(), rendition: None }],
+        flags: vec![vec!["--seed=1".into()], vec!["--seed=2".into()]],
+        ..Default::default()
+    };
+    let jobs = queue::submit(&lib, &group).unwrap();
+    let out = purge::purge(&lib, &[a.clone(), b.clone()], false).unwrap();
+    assert_eq!(out.deleted, std::slice::from_ref(&b));
+    assert_eq!(out.in_use, [(a.clone(), Holder::Job(jobs[0].id))]);
+    assert!(lib.item_dir(&a).exists() && !lib.item_dir(&b).exists());
+    queue::cancel(&lib, jobs[0].id).unwrap();
+    let out = purge::purge(&lib, std::slice::from_ref(&a), false).unwrap();
+    assert_eq!(out.in_use, [(a.clone(), Holder::Job(jobs[1].id))], "the other job still needs it");
+    queue::fail(&lib, jobs[1].id, "x", None).unwrap();
+    let out = purge::purge(&lib, std::slice::from_ref(&a), false).unwrap();
+    assert_eq!((out.deleted, out.in_use), (vec![a.clone()], vec![]));
 }
 
 #[test]

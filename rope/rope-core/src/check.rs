@@ -2,7 +2,7 @@
 
 use crate::catalog::Catalog;
 use crate::hash::{self, short};
-use crate::{Library, journal, runs, store};
+use crate::{Library, journal, queue, runs, store};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::fs;
@@ -23,6 +23,7 @@ pub fn check(lib: &Library, hash: bool, fix: bool) -> Result<Report> {
     let mut r = Report::default();
     let (metas, unreadable) = store::scan(lib)?;
     r.problems.extend(unreadable.into_iter().map(|p| format!("unreadable meta.json: {p}")));
+    r.problems.extend(queue::scan(lib)?.1.into_iter().map(|p| format!("unreadable job in the queue: {p}")));
     let ids: HashSet<&str> = metas.iter().map(|m| m.sha256.as_str()).collect();
 
     for m in &metas {

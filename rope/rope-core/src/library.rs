@@ -112,6 +112,11 @@ impl Library {
         self.root.join("envs")
     }
 
+    /// rope-queue's jobs and counters; see `queue`.
+    pub fn queue_dir(&self) -> PathBuf {
+        self.root.join("queue")
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join(".cache")
     }
@@ -142,6 +147,22 @@ impl Library {
     pub fn try_run_lock(&self) -> Result<Option<Lock>> {
         let file = self.lock_file("run.lock")?;
         Ok(try_lock(&file).context("cannot lock run.lock")?.then_some(Lock { _file: file }))
+    }
+
+    /// The run lock, shared and waiting for a purge in progress: held from bringing images in to recording that
+    /// they are used, by a run in `runs/` or by jobs in `queue/`, so purge cannot delete them in between.
+    pub fn run_lock_shared(&self) -> Result<Lock> {
+        let file = self.lock_file("run.lock")?;
+        file.lock_shared().context("cannot lock run.lock")?;
+        Ok(Lock { _file: file })
+    }
+
+    /// The lock rope-queue's daemon holds for its life, exclusive and without waiting: `None` while a daemon runs.
+    pub fn try_queue_lock(&self) -> Result<Option<Lock>> {
+        let dir = self.queue_dir();
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let file = self.lock_file("queue/lock")?;
+        Ok(try_lock(&file).context("cannot lock queue/lock")?.then_some(Lock { _file: file }))
     }
 
     pub(crate) fn lock_file(&self, name: &str) -> Result<File> {

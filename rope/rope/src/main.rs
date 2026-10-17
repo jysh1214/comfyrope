@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use rope_core::catalog::Catalog;
 use rope_core::hash::short;
 use rope_core::lineage::Lineage;
+use rope_core::purge::Holder;
 use rope_core::store::{self, NewImage};
 use rope_core::{Library, Meta, check, journal, prompts, purge, repro, time};
 use serde_json::{Value, json};
@@ -467,15 +468,22 @@ fn run(cli: Cli) -> Result<()> {
             let tail = &picked[picked.len().saturating_sub(n)..];
             emit(json, json!(tail), || {
                 for e in tail {
-                    let ids: Vec<&str> = e["ids"]
+                    let mut what: Vec<String> = e["ids"]
                         .as_array()
-                        .map(|a| a.iter().filter_map(Value::as_str).map(short).collect())
+                        .map(|a| a.iter().filter_map(Value::as_str).map(|s| short(s).to_owned()).collect())
                         .unwrap_or_default();
+                    // a line about something other than images, such as the queue's, says so in its own fields
+                    let fields = e.as_object().into_iter().flatten();
+                    what.extend(
+                        fields
+                            .filter(|(k, _)| !matches!(k.as_str(), "at" | "op" | "ids"))
+                            .map(|(k, v)| format!("{k}={v}")),
+                    );
                     println!(
                         "{}  {:<8} {}",
                         e["at"].as_str().unwrap_or("?"),
                         e["op"].as_str().unwrap_or("?"),
-                        ids.join(" ")
+                        what.join(" ")
                     );
                 }
             })
@@ -1096,7 +1104,14 @@ fn purge_cmd(lib: &Library, json: bool, ids: &[String], trash: bool, force: bool
     }
     let out = purge::purge(lib, &shas, break_lineage)?;
     let kept: Vec<Value> = out.kept.iter().map(|(k, f)| json!({"id": k, "for": f})).collect();
-    let in_use: Vec<Value> = out.in_use.iter().map(|(k, pid)| json!({"id": k, "pid": pid})).collect();
+    let in_use: Vec<Value> = out
+        .in_use
+        .iter()
+        .map(|(k, h)| match h {
+            Holder::Run(pid) => json!({"id": k, "pid": pid}),
+            Holder::Job(job) => json!({"id": k, "job": job}),
+        })
+        .collect();
     emit(json, json!({"deleted": out.deleted, "kept": kept, "in_use": in_use}), || {
         println!("deleted {} image(s)", out.deleted.len());
         for (k, f) in &out.kept {
@@ -1106,11 +1121,8 @@ fn purge_cmd(lib: &Library, json: bool, ids: &[String], trash: bool, force: bool
                 f.len()
             );
         }
-        for (k, pid) in &out.in_use {
-            println!(
-                "left {} alone: the img2img.py run with pid {pid} uses it; purge it when that run is done",
-                short(k)
-            );
+        for (k, h) in &out.in_use {
+            println!("left {} alone: {h} uses it; purge it once that is done", short(k));
         }
     })
 }

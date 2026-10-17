@@ -4,15 +4,16 @@
 //! image keeps its bytes (and the converted files uploaded in its place) and loses everything else: name,
 //! sources, recipe, note, folder, tags. It goes for good once the last image made from it is purged.
 //!
-//! An image that a running img2img.py uses (see `runs`) is left alone: its result, not in the library yet, will
-//! be made from it.
+//! An image that a running img2img.py uses (see `runs`), or that a job waiting in rope-queue needs (see `queue`),
+//! is left alone: its result, not in the library yet, will be made from it.
 
 use crate::catalog::Catalog;
 use crate::hash::short;
-use crate::{Library, Meta, atomic, journal, runs, store, time};
+use crate::{Library, Meta, atomic, journal, queue, runs, store, time};
 use anyhow::{Result, bail};
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::fs;
 
 #[derive(Debug, Default)]
@@ -20,17 +21,39 @@ pub struct Purged {
     pub deleted: Vec<String>,
     /// Images whose bytes stay, with the images made from them.
     pub kept: Vec<(String, Vec<String>)>,
-    /// Images left as they are: a running img2img.py uses them, the pid says which.
-    pub in_use: Vec<(String, u32)>,
+    /// Images left as they are, with what uses each.
+    pub in_use: Vec<(String, Holder)>,
 }
 
-/// Purges `ids`, except those a running img2img.py uses. With `break_lineage`, images others were made from go
-/// too, and those can no longer be replayed.
+/// What uses an image that purge left alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    /// An img2img.py run in progress, by pid.
+    Run(u32),
+    /// An unfinished job in rope-queue, by id.
+    Job(u64),
+}
+
+impl fmt::Display for Holder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Holder::Run(pid) => write!(f, "the img2img.py run with pid {pid}"),
+            Holder::Job(id) => write!(f, "job #{id} in rope-queue"),
+        }
+    }
+}
+
+/// Purges `ids`, except those a running img2img.py or an unfinished job in rope-queue uses. With `break_lineage`,
+/// images others were made from go too, and those can no longer be replayed.
 pub fn purge(lib: &Library, ids: &[String], break_lineage: bool) -> Result<Purged> {
     let Some(_run) = lib.try_run_lock()? else {
         bail!("an img2img.py run is bringing its inputs in; purge again in a moment");
     };
-    let busy = runs::in_use(lib)?;
+    let mut busy: HashMap<String, Holder> =
+        runs::in_use(lib)?.into_iter().map(|(id, pid)| (id, Holder::Run(pid))).collect();
+    for (id, job) in queue::active_inputs(lib)? {
+        busy.entry(id).or_insert(Holder::Job(job));
+    }
     let _lock = lib.lock()?;
     let (metas, problems) = store::scan(lib)?;
     if !problems.is_empty() {
@@ -47,7 +70,7 @@ pub fn purge(lib: &Library, ids: &[String], break_lineage: bool) -> Result<Purge
             bail!("no image {} in rope", short(id));
         }
         match busy.get(id) {
-            Some(&pid) if !out.in_use.iter().any(|(i, _)| i == id) => out.in_use.push((id.clone(), pid)),
+            Some(&holder) if !out.in_use.iter().any(|(i, _)| i == id) => out.in_use.push((id.clone(), holder)),
             Some(_) => {}
             None => {
                 targets.insert(id.clone());

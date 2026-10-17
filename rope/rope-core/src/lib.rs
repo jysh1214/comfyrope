@@ -12,6 +12,8 @@
 //! .lock                flock held around every metadata change
 //! run.lock             img2img.py holds it shared while it brings its inputs in; purge takes it exclusive
 //! runs/<pid>.json      the images each img2img.py run in progress uses, locked by it while it lasts
+//! queue/               rope-queue: queue.json counts ids, lock is held by the daemon, jobs/<id>/ holds each
+//!                      job's job.json, log and out/, comfyui/ the ComfyUI logs
 //! envs/<id>.json       environment snapshots, one per distinct environment
 //! items/ab/<sha256>/   one image or clip: <sha12>.<ext> (read-only), meta.json, graph.json, repro.sh, note.txt,
 //!                      uploaded/, and for a clip poster.png, its first frame
@@ -29,6 +31,7 @@ pub mod lineage;
 pub mod meta;
 pub mod prompts;
 pub mod purge;
+pub mod queue;
 pub mod repro;
 pub mod runs;
 pub mod store;

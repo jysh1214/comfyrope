@@ -1630,7 +1630,7 @@ impl App {
                                     }
                                     if !p.in_use.is_empty() {
                                         s += &format!(
-                                            "; left {} that a running img2img.py uses (delete them for good when it is done)",
+                                            "; left {} that a running img2img.py or a job in rope-queue uses (purge them again once it is done)",
                                             p.in_use.len()
                                         );
                                     }
