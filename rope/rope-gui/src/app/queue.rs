@@ -28,6 +28,8 @@ pub(super) enum Act {
         jobs: Vec<u64>,
         groups: Vec<u64>,
     },
+    /// Cancels every job that is not finished, the running one too: empties the queue.
+    CancelAll,
     Pause,
     Resume,
     /// Removes the finished jobs: done, failed and cancelled alike.
@@ -264,6 +266,15 @@ impl App {
                 let n = v["cancelled"].as_array().map_or(0, Vec::len);
                 self.say(format!("{n} job(s) cancelled{}", skipped(&v["skipped"])), false);
             }
+            Act::CancelAll => {
+                let jobs: Vec<u64> = self.model().jobs.iter().filter(|j| !j.is_terminal()).map(|j| j.id).collect();
+                if jobs.is_empty() {
+                    anyhow::bail!("nothing to cancel: every job is finished");
+                }
+                let v = self.daemon(&Request::Cancel { jobs, groups: vec![] })?;
+                let n = v["cancelled"].as_array().map_or(0, Vec::len);
+                self.say(format!("{n} job(s) cancelled; the queue is empty{}", skipped(&v["skipped"])), false);
+            }
             Act::Retry { jobs, groups } => {
                 let v = self.daemon(&Request::Retry { jobs, groups })?;
                 let n = v["retried"].as_array().map_or(0, Vec::len);
@@ -382,6 +393,14 @@ impl App {
                     }
                 } else if ui.small_button("Pause").on_hover_text("the running job finishes; the next waits").clicked() {
                     actions.push(Action::Queue(Act::Pause));
+                }
+                let button = egui::Button::new("Cancel all").small();
+                if ui
+                    .add_enabled(waiting > 0, button)
+                    .on_hover_text("cancel every job that is not finished, the running one too; Retry brings them back")
+                    .clicked()
+                {
+                    actions.push(Action::Queue(Act::CancelAll));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

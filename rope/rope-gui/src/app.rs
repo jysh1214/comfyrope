@@ -2247,10 +2247,22 @@ mod tests {
         press(&ctx, &mut app, egui::Key::Escape);
         assert_eq!(app.queue.selected, None);
 
-        // the daemon's controls want a daemon for this library; clearing does not
+        // the daemon's controls want a daemon for this library (a daemon for the user's own library may well be
+        // running while the tests run: it is refused the same way); clearing does not
         assert!(!app.queue.connected);
         app.apply(Action::Queue(Act::Cancel { jobs: vec![second], groups: vec![] }), Some(&ctx));
-        assert!(app.status.as_ref().is_some_and(|(t, err, _)| *err && t.contains("not running")), "{:?}", app.status);
+        let refused = |a: &App| {
+            a.status
+                .as_ref()
+                .is_some_and(|(t, err, _)| *err && (t.contains("not running") || t.contains("another library")))
+        };
+        assert!(refused(&app), "{:?}", app.status);
+        app.apply(Action::Queue(Act::CancelAll), Some(&ctx));
+        assert!(
+            app.status.as_ref().is_some_and(|(t, err, _)| *err && t.contains("every job is finished")),
+            "{:?}",
+            app.status
+        );
         app.apply(Action::Queue(Act::Clear), Some(&ctx));
         assert!(app.model().jobs.is_empty(), "{:?}", app.model().jobs.iter().map(|j| j.id).collect::<Vec<_>>());
         assert!(queue::list(&lib).unwrap().is_empty());

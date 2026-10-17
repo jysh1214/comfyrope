@@ -131,7 +131,7 @@ Default: 5 seconds at 16 fps, long side 640 px, the 4-step LoRAs; about 1.5 minu
 rope-gui                 # or rope/target/release/rope-gui
 ```
 
-Folders and tags on the left, thumbnails in the middle, the selected image on the right with its recipe. Double-click for the large view; clips play. The **Queue** button at the top right shows what rope-queue is doing, with cancel, retry, pause and Clear finished.
+Folders and tags on the left, thumbnails in the middle, the selected image on the right with its recipe. Double-click for the large view; clips play. The **Queue** button at the top right shows what rope-queue is doing, with cancel, retry, pause, Cancel all and Clear finished.
 
 The same from the terminal: `rope ls trips/京都`, `rope show 3fa9c1`, `rope tree`, `rope mv`, `rope tag`, `rope rm`. `rope --help`. Everything about the library, the GUI, deleting and backups is in [rope/README.md](rope/README.md).
 
