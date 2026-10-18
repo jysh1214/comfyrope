@@ -20,6 +20,11 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Act {
     Select(Option<Sel>),
+    /// Folds a group to its header line, or opens it again.
+    Fold {
+        group: u64,
+        collapsed: bool,
+    },
     Cancel {
         jobs: Vec<u64>,
         groups: Vec<u64>,
@@ -76,11 +81,18 @@ pub(super) struct Live {
     pub running: Option<Running>,
     pub selected: Option<Sel>,
     pub show_log: bool,
+    /// The groups folded or opened by hand; the rest follow the default, which folds a finished group.
+    pub folded: BTreeMap<u64, bool>,
     /// The selected job's log as last read: job, text, when.
     pub log: Option<(u64, String, Instant)>,
 }
 
 impl Live {
+    /// Whether a group shows only its header: as the user last set it, else when the group is finished.
+    pub fn collapsed(&self, group: u64, finished: bool) -> bool {
+        self.folded.get(&group).copied().unwrap_or(finished)
+    }
+
     /// Starts following the daemon for the library at `root` on a thread of its own; it reconnects whenever the
     /// daemon comes back.
     pub fn start(ctx: &egui::Context, root: PathBuf) -> Live {
@@ -98,6 +110,7 @@ impl Live {
             running: None,
             selected: None,
             show_log: false,
+            folded: BTreeMap::new(),
             log: None,
         }
     }
@@ -262,6 +275,9 @@ impl App {
                 }
                 self.queue.selected = sel;
             }
+            Act::Fold { group, collapsed } => {
+                self.queue.folded.insert(group, collapsed);
+            }
             Act::Cancel { jobs, groups } => {
                 let v = self.daemon(&Request::Cancel { jobs, groups })?;
                 let n = v["cancelled"].as_array().map_or(0, Vec::len);
@@ -332,7 +348,8 @@ impl App {
     }
 
     /// The middle: the status line, then every group in the order the daemon takes them, oldest first, and its jobs
-    /// in order, so the page reads top to bottom as the queue runs.
+    /// in order, so the page reads top to bottom as the queue runs. A group folds to its header line; a finished one
+    /// starts folded, so that a long batch's done groups take one line each.
     pub(super) fn queue_page(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         self.queue_status(ui, actions);
         ui.separator();
@@ -351,9 +368,13 @@ impl App {
                 ui.label(RichText::new("No jobs. img2img.py and img2vid.py put theirs here.").weak());
             }
             for (gid, jobs) in &groups {
-                self.group_header(ui, *gid, jobs, actions);
-                for job in jobs {
-                    self.job_row(ui, &model, job, actions);
+                let finished = jobs.iter().all(|j| j.is_terminal());
+                let collapsed = self.queue.collapsed(*gid, finished);
+                self.group_header(ui, *gid, jobs, collapsed, actions);
+                if !collapsed {
+                    for job in jobs {
+                        self.job_row(ui, &model, job, actions);
+                    }
                 }
                 ui.add_space(10.0);
             }
@@ -419,8 +440,9 @@ impl App {
         });
     }
 
-    fn group_header(&mut self, ui: &mut egui::Ui, gid: u64, jobs: &[&Job], actions: &mut Vec<Action>) {
+    fn group_header(&mut self, ui: &mut egui::Ui, gid: u64, jobs: &[&Job], collapsed: bool, actions: &mut Vec<Action>) {
         let first = jobs[0];
+        let mut fold = false;
         let selected = self.queue.selected == Some(Sel::Group(gid));
         let fill =
             if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.35) } else { ui.visuals().faint_bg_color };
@@ -435,6 +457,14 @@ impl App {
                     // what the group is: its input and prompt, where it goes, its tags; a batch's groups share the
                     // command line and differ in these
                     ui.horizontal(|ui| {
+                        // the triangle of a collapsing header, turning as the group folds and opens
+                        let (_, triangle) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+                        let openness = ui.ctx().animate_bool(ui.id().with("fold"), !collapsed);
+                        egui::collapsing_header::paint_default_icon(ui, openness, &triangle);
+                        let hint = if collapsed { "show its jobs" } else { "fold the group to this line" };
+                        if triangle.on_hover_text(hint).clicked() {
+                            fold = true;
+                        }
                         ui.add(egui::Label::new(RichText::new(format!("g{gid}")).strong()).selectable(false));
                         ui.add(
                             egui::Label::new(RichText::new(group_title(first)).strong()).truncate().selectable(false),
@@ -468,7 +498,14 @@ impl App {
         if resp.clicked() {
             actions.push(Action::Queue(Act::Select(Some(Sel::Group(gid)))));
         }
+        if fold || resp.double_clicked() {
+            actions.push(Action::Queue(Act::Fold { group: gid, collapsed: !collapsed }));
+        }
         resp.context_menu(|ui| {
+            if ui.button(if collapsed { "Expand" } else { "Collapse" }).clicked() {
+                actions.push(Action::Queue(Act::Fold { group: gid, collapsed: !collapsed }));
+                ui.close();
+            }
             if ui.add_enabled(open > 0, egui::Button::new("Cancel group")).clicked() {
                 actions.push(Action::Queue(Act::Cancel { jobs: vec![], groups: vec![gid] }));
                 ui.close();

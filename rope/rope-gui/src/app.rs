@@ -1719,7 +1719,8 @@ impl App {
             return;
         }
         if self.view == View::Queue {
-            // on the Queue page Esc lets the selected job or group go; the rest is the mouse's
+            // on the Queue page Esc lets the selected job or group go, Delete cancels it, Left and Right fold and
+            // open a group; the rest is the mouse's
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 actions.push(Action::Queue(queue::Act::Select(None)));
             }
@@ -1732,6 +1733,13 @@ impl App {
                         actions.push(Action::Queue(queue::Act::Cancel { jobs: vec![], groups: vec![g] }))
                     }
                     None => {}
+                }
+            }
+            if let Some(queue::Sel::Group(g)) = self.queue.selected {
+                let (left, right) =
+                    ctx.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
+                if left || right {
+                    actions.push(Action::Queue(queue::Act::Fold { group: g, collapsed: left }));
                 }
             }
             return;
@@ -2290,6 +2298,14 @@ mod tests {
         frames_until(&ctx, &mut app, |a| a.queue.log.as_ref().is_some_and(|(j, _, _)| *j == second));
         app.apply(Action::Queue(Act::Select(Some(Sel::Group(jobs[0].group.id)))), Some(&ctx));
         frames_until(&ctx, &mut app, |a| matches!(a.queue.selected, Some(Sel::Group(_))));
+        // both jobs are finished, so the group starts folded; Right opens it, Left folds it, and that sticks
+        let g = jobs[0].group.id;
+        assert!(app.queue.collapsed(g, true));
+        press(&ctx, &mut app, egui::Key::ArrowRight);
+        assert!(!app.queue.collapsed(g, true));
+        press(&ctx, &mut app, egui::Key::ArrowLeft);
+        assert!(app.queue.collapsed(g, true));
+        frames_until(&ctx, &mut app, |_| true);
         press(&ctx, &mut app, egui::Key::Escape);
         assert_eq!(app.queue.selected, None);
 
