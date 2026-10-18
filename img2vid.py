@@ -9,18 +9,24 @@
 #     "rawpy>=0.24",             # camera RAW: DNG, CR2/CR3, NEF, ARW, RAF, ORF, RW2, ...
 # ]
 # ///
-"""Image to video from the command line: a start image plus a prompt make a short clip with Wan 2.2, the 14B
-image-to-video pair, through ComfyUI's API. Built on comfycore.py like img2img.py.
+"""Image to video from the command line: a start image plus a prompt make a short clip, through ComfyUI's API,
+with Wan 2.2 (the 14B image-to-video pair) or MiniMax H3, which makes a soundtrack with the picture, as FastVideo's
+8-step FastH3 or as H3 itself. Built on comfycore.py like img2img.py.
 
     ./img2vid.py photo.jpg "the camera slowly pushes in while the leaves move in the wind"
     ./img2vid.py photo.jpg "..." -n 2 -s 42 --seconds 3 --size 480
-    ./img2vid.py photo.jpg "..." --lightning off      # the full 20-step model at cfg 3.5: about five times slower
+    ./img2vid.py photo.jpg "..." --lightning off      # Wan's full 20-step model at cfg 3.5: about five times slower
+    ./img2vid.py photo.jpg "..." -m fasth3            # MiniMax H3 distilled to 8 steps, with sound, about 480p
+    ./img2vid.py photo.jpg "..." -m h3 --seconds 8    # MiniMax H3 itself with its 8-step turbo LoRA, about 768p
+    ./img2vid.py photo.jpg "..." -m h3 --lightning off --no-audio    # the full 20-step H3, the picture only
     ./img2vid.py photo.jpg "..." --dry-run            # only print the API workflow JSON
 
-The clip keeps the start image's aspect ratio, scaled so that its long side is --size pixels (default 640), and
-lasts --seconds at --fps (default 5 s at Wan's own 16 fps: 81 frames). The start image is read as img2img.py
-reads its inputs (HEIC, RAW and the like are converted first). Prompts work best as a description of the
-motion: what moves, and how the camera moves.
+The clip keeps the start image's aspect ratio, scaled so that its long side is --size pixels (default 640 for Wan,
+864 for FastH3, 1280 for H3), and lasts --seconds (default 5). Wan runs at --fps (default its own 16; 81 frames
+for 5 s); MiniMax H3 at 24, fixed, on its grid of 17k+5 frames (124 for 5 s), and 5 to 15 s is what it was
+trained on. The start image is read as img2img.py reads its inputs (HEIC, RAW and the like are converted first).
+Prompts work best as a description of the motion: what moves, and how the camera moves; for MiniMax, what is
+heard too.
 
 Each clip goes into rope like an image, with its recipe, the workflow ComfyUI ran, its first frame for the
 thumbnail, and its start image as its upstream; rope-gui plays it. --into, --tag, --note and --library are
@@ -29,7 +35,10 @@ Names are <time>_<image>_<model>_s<seed>, as img2img.py's. ComfyUI keeps its own
 ComfyUI/output/img2vid/.
 
 On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step
-LoRAs (the first one longer: 30 GB of models to load) and about 9 minutes without.
+LoRAs (the first one longer: 30 GB of models to load) and about 9 minutes without. FastVideo measured a 5-second
+FastH3 clip at about 55 s at 480p and 155 s at 768p; H3 with its turbo LoRA takes about 2 minutes at 768p. MiniMax
+loads about 40 GB of models, and so does switching between it and Wan. rope-gui plays clips without their sound;
+the mp4 has it.
 """
 from __future__ import annotations
 
@@ -62,7 +71,28 @@ LIGHTX2V = {  # the 4-step LoRAs, one per model
     "low": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
 }
 FETCH.update(dict.fromkeys([*WAN22.values(), *LIGHTX2V.values()], "uv run download_models.py wan"))
-MODELS = {"14b": "Wan 2.2 image-to-video, the A14B high-noise and low-noise pair"}
+# MiniMax H3's files as ComfyUI's FastH3 and H3 templates name them (download_models.py h3 fetches them; H3 itself
+# and its turbo LoRA with --h3-model fl2va). The pruned int8 files are the ones a 24 GB card holds.
+H3 = {
+    "fasth3": "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors",
+    "h3": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "turbo": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+    "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "vae": "minimax_h3_video_vae_int8_convrot.safetensors",
+    "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+}
+FETCH.update(dict.fromkeys([H3["fasth3"], H3["clip"], H3["vae"], H3["audio_vae"]], "uv run download_models.py h3"))
+FETCH.update(dict.fromkeys([H3["h3"], H3["turbo"]], "uv run download_models.py h3 --h3-model fl2va"))
+MODELS = {
+    "14b": "Wan 2.2 image-to-video, the A14B high-noise and low-noise pair",
+    "fasth3": "FastVideo's FastH3, MiniMax H3 distilled to 8 steps, with sound",
+    "h3": "MiniMax H3 itself, with its 8-step turbo LoRA unless Lightning is off, with sound",
+}
+MINIMAX = ("fasth3", "h3")
+H3_FPS = 24  # MiniMax H3's own rate, fixed: its frames come in 17k+5 at 24 fps
+# What --lightning takes per model, the default first: Wan's lightx2v 4-step LoRAs, H3's turbo 8-step LoRA; FastH3
+# is distilled already and takes none.
+LIGHTNING = {"14b": ("4", "off"), "h3": ("8", "off"), "fasth3": ("off",)}
 # Wan's own negative prompt, as the template has it: garish colours, overexposure, still frames, blur, text, ...
 NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
             "残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，"
@@ -81,18 +111,19 @@ class Request:
 
     images: list[Path | str]  # the start image, alone in a list as comfycore wants it, or "@ID" for one in rope
     prompt: str
-    model: str = "14b"  # see MODELS
+    model: str = "14b"  # see MODELS: 14b (Wan 2.2), fasth3, h3 (MiniMax H3)
     count: int = 1  # -n: how many clips, one seed each
     seed: int | None = None  # -s: the first clip's seed; None picks one at random
-    negative: str | None = None  # default NEGATIVE, Wan's own; has an effect only when cfg is above 1
-    steps: int | None = None  # default 4 with Lightning, 20 without; the high-noise model takes the first half
-    cfg: float | None = None  # default 1 with Lightning, 3.5 without
-    shift: float | None = None  # ModelSamplingSD3's shift; default 5
-    lora: list[tuple[str, float] | str] = field(default_factory=list)  # applied to both models; "style.safetensors:0.8"
-    lightning: str | None = None  # "4", the lightx2v 4-step LoRAs (default), or "off"
+    negative: str | None = None  # Wan: default NEGATIVE, Wan's own; has an effect only when cfg is above 1
+    steps: int | None = None  # Wan: default 4 with Lightning, 20 without, half for each model; fasth3: 8; h3: 8 or 20
+    cfg: float | None = None  # Wan: default 1 with Lightning, 3.5 without; MiniMax samples without guidance
+    shift: float | None = None  # the sampling shift; default 5 for Wan, 10 for fasth3, 12 for h3
+    lora: list[tuple[str, float] | str] = field(default_factory=list)  # applied to the model(s); "style.safetensors:0.8"
+    lightning: str | None = None  # see LIGHTNING: "4" (Wan, default), "8" (h3, default) or "off"
     seconds: float | None = None  # default 5
-    fps: int | None = None  # default 16, Wan's own rate; another value only changes the playback speed
-    size: int | None = None  # the long side of the clip, in pixels; default 640
+    fps: int | None = None  # Wan: default 16, its own rate; another value only changes the speed. MiniMax: 24, fixed
+    size: int | None = None  # the long side of the clip, in pixels; default 640 for Wan, 864 for fasth3, 1280 for h3
+    audio: bool = True  # MiniMax: decode the soundtrack it makes with the picture (--no-audio skips it); Wan has none
     into: str | None = None  # the rope folder for the clips, e.g. "trips/京都", made if there is none; None: unfiled
     tags: list[str] = field(default_factory=list)
     note: str | None = None
@@ -115,22 +146,46 @@ class Request:
         if not r.images[0].is_file() and not rope_ref(r.images[0]):
             raise ValueError(f"no such image: {r.images[0]}")
         if r.model not in MODELS:
-            raise ValueError(f"model must be {' or '.join(MODELS)}, not {r.model}")
+            raise ValueError(f"model must be {', '.join(MODELS)}, not {r.model}")
         if r.count < 1:
             raise ValueError("count must be at least 1")
-        r.lightning = "4" if self.lightning is None else str(self.lightning)
-        if r.lightning not in ("4", "off"):
-            raise ValueError(f"lightning must be 4 or off, not {r.lightning}")
-        fast = r.lightning != "off"
-        r.steps = self.steps or (4 if fast else 20)
-        r.cfg = (1.0 if fast else 3.5) if self.cfg is None else float(self.cfg)
-        r.shift = 5.0 if self.shift is None else float(self.shift)
-        r.negative = NEGATIVE if self.negative is None else self.negative
+        takes = LIGHTNING[r.model]
+        r.lightning = takes[0] if self.lightning is None else str(self.lightning)
+        if r.lightning not in takes:
+            if r.model == "fasth3":
+                raise ValueError("fasth3 is distilled to 8 steps already: lightning is for 14b and h3")
+            raise ValueError(f"lightning takes {' or '.join(takes)} for {r.model}, not {r.lightning}")
+        fast = r.lightning != "off"  # a step-cutting LoRA is on: Wan's lightx2v, H3's turbo
+        r.audio = bool(self.audio)
         r.seconds = 5.0 if self.seconds is None else float(self.seconds)
-        r.fps = 16 if self.fps is None else int(self.fps)
-        r.size = 640 if self.size is None else int(self.size)
-        if r.steps < 2:
-            raise ValueError("steps must be at least 2: one for each model")
+        if r.model in MINIMAX:
+            r.steps = self.steps or (8 if r.model == "fasth3" or fast else 20)
+            r.cfg = 1.0 if self.cfg is None else float(self.cfg)
+            r.shift = (10.0 if r.model == "fasth3" else 12.0) if self.shift is None else float(self.shift)
+            r.negative = self.negative or None
+            r.fps = H3_FPS if self.fps is None else int(self.fps)
+            r.size = (864 if r.model == "fasth3" else 1280) if self.size is None else int(self.size)
+            if r.model == "fasth3" and r.steps != 8:
+                raise ValueError("fasth3 is distilled for exactly 8 steps")
+            if r.steps < 1:
+                raise ValueError("steps must be at least 1")
+            if r.cfg != 1.0:
+                raise ValueError("cfg is Wan's: MiniMax H3 samples without guidance")
+            if r.negative:
+                raise ValueError("negative is Wan's: MiniMax H3 has no negative prompt")
+            if r.fps != H3_FPS:
+                raise ValueError(f"fps is {H3_FPS} for MiniMax H3, fixed")
+        else:
+            r.steps = self.steps or (4 if fast else 20)
+            r.cfg = (1.0 if fast else 3.5) if self.cfg is None else float(self.cfg)
+            r.shift = 5.0 if self.shift is None else float(self.shift)
+            r.negative = NEGATIVE if self.negative is None else self.negative
+            r.fps = 16 if self.fps is None else int(self.fps)
+            r.size = 640 if self.size is None else int(self.size)
+            if r.steps < 2:
+                raise ValueError("steps must be at least 2: one for each model")
+            if not r.audio:
+                raise ValueError("Wan makes no sound: --no-audio is for fasth3 and h3")
         if not 0 < r.seconds <= 60:
             raise ValueError("seconds takes more than 0 and at most 60")
         if not 1 <= r.fps <= 120:
@@ -141,14 +196,18 @@ class Request:
 
 
 def frames(r: Request) -> int:
-    """How many frames a clip has: seconds * fps, as the nearest 4k+1, which is what Wan's latent holds; 81 for
-    5 s at 16 fps."""
+    """How many frames a clip has: seconds * fps on the model's grid. Wan's latent holds 4k+1, the nearest: 81 for
+    5 s at 16 fps. MiniMax H3's holds 17k+5, the next one up, as its template counts: 124 for 5 s at 24 fps."""
+    if r.model in MINIMAX:
+        n = max(5, round(r.seconds * r.fps))
+        return n + (5 - n % 17) % 17
     return max(1, round(r.seconds * r.fps / 4)) * 4 + 1
 
 
-def frame_size(image: Path, size: int) -> tuple[int, int]:
+def frame_size(image: Path, size: int, multiple: int = 16) -> tuple[int, int]:
     """The clip's width and height: the start image's aspect ratio with the long side scaled to `size`, both
-    sides rounded to a multiple of 16 (what Wan's latent needs). WanImageToVideo then scales the image to it."""
+    sides rounded to `multiple` (16 for Wan's latent, 32 for MiniMax's). The image-to-video node then scales the
+    image to it."""
     from PIL import Image
 
     with Image.open(image) as im:
@@ -156,12 +215,17 @@ def frame_size(image: Path, size: int) -> tuple[int, int]:
         if im.getexif().get(0x0112, 1) in (5, 6, 7, 8):  # turned by its EXIF orientation, as ComfyUI reads it
             w, h = h, w
     scale = size / max(w, h)
-    return max(16, round(w * scale / 16) * 16), max(16, round(h * scale / 16) * 16)
+    return (max(multiple, round(w * scale / multiple) * multiple), max(multiple, round(h * scale / multiple) * multiple))
 
 
 # ---------------------------------------------------------------- workflows (ComfyUI API format)
 
 def build(r: Request, inputs: Inputs, seed: int) -> Graph:
+    """The request's workflow: Wan's or MiniMax's, by its model."""
+    return build_minimax(r, inputs, seed) if r.model in MINIMAX else build_wan(r, inputs, seed)
+
+
+def build_wan(r: Request, inputs: Inputs, seed: int) -> Graph:
     """ComfyUI template 'Wan 2.2 14B Image to Video', flattened: the two models sample one after the other, the
     high-noise one the first half of the steps, with the 4-step LoRAs unless Lightning is off."""
     g = Graph()
@@ -195,23 +259,81 @@ def build(r: Request, inputs: Inputs, seed: int) -> Graph:
     return g
 
 
+def build_minimax(r: Request, inputs: Inputs, seed: int) -> Graph:
+    """ComfyUI templates 'FastVideo FastH3: Image to Video' and 'MiniMax H3: Image to Video', flattened: one model,
+    sampled without guidance (res_multistep on the simple schedule), its latent decoded twice, into the frames and
+    into the soundtrack, which CreateVideo joins. FastH3 runs with FastVideo's video sparse attention as its
+    template does; H3 takes its turbo LoRA unless Lightning is off. The shift node spells out H3's own 12 and 3."""
+    g = Graph()
+    width, height = frame_size(inputs.uploads[0], r.size, 32)
+    image = g.add("LoadImage", image=inputs.uploaded[0])
+    clip = g.add("CLIPLoader", "loading the text encoder", clip_name=H3["clip"], type="minimax", device="default")
+    vae = g.add("VAELoader", vae_name=H3["vae"])
+    model = g.add("UNETLoader", "loading the diffusion model", unet_name=H3[r.model], weight_dtype="default")
+    if r.model == "h3" and r.lightning != "off":
+        model = g.add("LoraLoaderModelOnly", model=link(model), lora_name=H3["turbo"], strength_model=1.0)
+    model = add_loras(g, model, r.lora)
+    model = g.add("MiniMaxH3SigmaShift", model=link(model), shift_video=r.shift, shift_audio=3.0)
+    if r.model == "fasth3":
+        # the template's Video Sparse Attention: dense for the first fifth of the steps and for short sequences
+        model = g.add("ModelAttentionBackend", model=link(model), attention="comfy kitchen attention")
+        model = g.add("BlockSparseAttention", model=link(model), selection="vsa", start_percent=0.2, end_percent=1.0,
+                      dense_blocks="", min_tokens=12288, extra_tokens=256, sink_conditioning="exact_kv_and_rows",
+                      verbose=False, **{"selection.keep_percent": 10.0})
+    i2v = g.add("MiniMaxH3ImageToVideo", "encoding the start image", clip=link(clip), vae=link(vae), prompt=r.prompt,
+                width=width, height=height, length=frames(r), first_frame=link(image))
+    noise = g.add("RandomNoise", noise_seed=seed)
+    guider = g.add("BasicGuider", model=link(model), conditioning=link(i2v, 0))
+    sampler = g.add("KSamplerSelect", sampler_name="res_multistep")
+    sigmas = g.add("BasicScheduler", model=link(model), scheduler="simple", steps=r.steps, denoise=1.0)
+    out = g.add("SamplerCustomAdvanced", "sampling", noise=link(noise), guider=link(guider), sampler=link(sampler),
+                sigmas=link(sigmas), latent_image=link(i2v, 1))
+    pictures = g.add("VAEDecode", "decoding", samples=link(out, 0), vae=link(vae))
+    tracks = {"images": link(pictures), "fps": float(r.fps)}
+    if r.audio:
+        audio_vae = g.add("VAELoader", vae_name=H3["audio_vae"])
+        sound = g.add("VAEDecodeAudio", "decoding the soundtrack", samples=link(out, 0), vae=link(audio_vae))
+        tracks["audio"] = link(sound)
+    video = g.add("CreateVideo", "encoding the video", **tracks)
+    g.image_out = g.add("SaveVideo", video=link(video), filename_prefix="img2vid/clip", format="mp4")  # codec auto: h264
+    return g
+
+
 # ---------------------------------------------------------------- running jobs
 
 def video_flags(r: Request, seed: int) -> list[str]:
     """Every flag that changes the clip, as argv items: the seed is this clip's own and every default is spelled
     out, so later changes to the defaults cannot change the result. A new clip-affecting flag has to go here too."""
-    flags = [f"--model={r.model}", f"--lightning={r.lightning}", f"--steps={r.steps}", f"--cfg={exact(r.cfg)}",
-             f"--shift={exact(r.shift)}", f"--seconds={exact(r.seconds)}", f"--fps={r.fps}", f"--size={r.size}",
-             f"--seed={seed}"]
+    flags = [f"--model={r.model}"]
+    if r.model != "fasth3":  # FastH3 has no Lightning to speak of
+        flags.append(f"--lightning={r.lightning}")
+    flags.append(f"--steps={r.steps}")
+    if r.model == "14b":
+        flags.append(f"--cfg={exact(r.cfg)}")
+    flags += [f"--shift={exact(r.shift)}", f"--seconds={exact(r.seconds)}", f"--fps={r.fps}", f"--size={r.size}",
+              f"--seed={seed}"]
     flags += [f"--lora={name}:{exact(strength)}" for name, strength in r.lora]
-    return flags + [f"--negative={r.negative}"]
+    if r.model == "14b":
+        flags.append(f"--negative={r.negative}")
+    elif not r.audio:
+        flags.append("--no-audio")
+    return flags
 
 
 def describe(r: Request, base: int) -> str:
     """A request's settings in a line: model, steps, cfg, length, size, its seeds from `base`, LoRAs."""
-    bits = [f"model {r.model}", "Lightning 4-step" if r.lightning != "off" else "Lightning off", f"{r.steps} steps",
-            f"cfg {r.cfg:g}", f"shift {r.shift:g}", f"{frames(r)} frames ({r.seconds:g} s at {r.fps} fps)",
-            f"{r.size} px", f"seed {base}" + (f"-{base + r.count - 1}" if r.count > 1 else "")]
+    bits = [f"model {r.model}"]
+    if r.model == "14b":
+        bits.append("Lightning 4-step" if r.lightning != "off" else "Lightning off")
+    elif r.model == "h3":
+        bits.append("turbo 8-step" if r.lightning != "off" else "turbo off")
+    bits.append(f"{r.steps} steps")
+    if r.model == "14b":
+        bits.append(f"cfg {r.cfg:g}")
+    bits += [f"shift {r.shift:g}", f"{frames(r)} frames ({r.seconds:g} s at {r.fps} fps)", f"{r.size} px",
+             f"seed {base}" + (f"-{base + r.count - 1}" if r.count > 1 else "")]
+    if r.model in MINIMAX:
+        bits.append("with sound" if r.audio else "no sound")
     if r.lora:
         bits.append("LoRA " + ", ".join(f"{name}:{strength:g}" for name, strength in r.lora))
     return ", ".join(bits)
@@ -220,13 +342,18 @@ def describe(r: Request, base: int) -> str:
 # What the status line says while a node of a recorded workflow runs, by node class (--replay).
 REPLAY_LABELS = {"UNETLoader": "loading a diffusion model", "CLIPLoader": "loading the text encoder",
                  "LoraLoaderModelOnly": "loading a LoRA", "WanImageToVideo": "encoding the start image",
-                 "KSamplerAdvanced": "sampling", "VAEDecode": "decoding", "CreateVideo": "encoding the video"}
+                 "KSamplerAdvanced": "sampling", "VAEDecode": "decoding", "CreateVideo": "encoding the video",
+                 "MiniMaxH3ImageToVideo": "encoding the start image", "SamplerCustomAdvanced": "sampling",
+                 "VAEDecodeAudio": "decoding the soundtrack"}
 
 
 def reseed(nodes: dict, seed: int) -> None:
-    """Puts `seed` into a recorded workflow: the sampler that adds the noise, the high-noise model's."""
+    """Puts `seed` into a recorded workflow: Wan's sampler that adds the noise, the high-noise model's, or MiniMax's
+    noise node."""
     for node in nodes.values():
         if node["class_type"] == "KSamplerAdvanced" and node["inputs"].get("add_noise") == "enable":
+            node["inputs"]["noise_seed"] = seed
+        elif node["class_type"] == "RandomNoise":
             node["inputs"]["noise_seed"] = seed
 
 
@@ -250,20 +377,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("image", type=Path, help="the start image, or @ID for an image in rope")
     p.add_argument("prompt", help="the motion to make, in Chinese or English")
-    p.add_argument("-m", "--model", choices=list(MODELS), default="14b", help="Wan 2.2 14B image-to-video (the only one yet)")
+    p.add_argument("-m", "--model", choices=list(MODELS), default="14b",
+                   help="14b: Wan 2.2 14B image-to-video (default); fasth3: FastVideo's FastH3, MiniMax H3 distilled to "
+                        "8 steps, with sound; h3: MiniMax H3 itself, with sound")
     p.add_argument("-n", "--count", type=int, default=1, help="number of clips, one seed each (default 1)")
     p.add_argument("-s", "--seed", type=int, help="seed of the first clip (default: random, and printed)")
-    p.add_argument("--negative", help="negative prompt (default: Wan's own); only has an effect when cfg is above 1")
-    p.add_argument("--steps", type=int, help="sampling steps, half for each model (default 4 with Lightning, 20 without)")
-    p.add_argument("--cfg", type=float, help="guidance scale (default 1 with Lightning, 3.5 without)")
-    p.add_argument("--shift", type=float, help="sampling shift (default 5)")
+    p.add_argument("--negative", help="Wan: negative prompt (default: Wan's own); only has an effect when cfg is above 1")
+    p.add_argument("--steps", type=int, help="sampling steps (Wan: default 4 with Lightning, 20 without, half for each "
+                                             "model; fasth3: 8, fixed; h3: 8 with the turbo LoRA, 20 without)")
+    p.add_argument("--cfg", type=float, help="Wan: guidance scale (default 1 with Lightning, 3.5 without); MiniMax samples without guidance")
+    p.add_argument("--shift", type=float, help="sampling shift (default 5 for Wan, 10 for fasth3, 12 for h3)")
     p.add_argument("--lora", type=parse_lora, action="append", default=[], metavar="FILE[:STRENGTH]",
-                   help="extra LoRA from models/loras, applied to both models, e.g. style.safetensors:0.8; repeatable")
-    p.add_argument("--lightning", choices=["4", "off"],
-                   help="the lightx2v 4-step LoRAs (default), or off for the full 20-step model")
-    p.add_argument("--seconds", type=float, help="length of the clip (default 5)")
-    p.add_argument("--fps", type=int, help="frames per second (default 16, Wan's own; another value only changes the speed)")
-    p.add_argument("--size", type=int, help="the long side of the clip in pixels (default 640); the start image's aspect ratio is kept")
+                   help="extra LoRA from models/loras, applied to the model (Wan: both), e.g. style.safetensors:0.8; repeatable")
+    p.add_argument("--lightning", choices=["4", "8", "off"],
+                   help="the step-cutting LoRA: Wan's lightx2v 4-step (default) or h3's turbo 8-step (default), or off "
+                        "for the full 20-step model; fasth3 is distilled already and takes none")
+    p.add_argument("--seconds", type=float, help="length of the clip (default 5; MiniMax knows 5 to 15)")
+    p.add_argument("--fps", type=int, help="Wan: frames per second (default 16, its own; another value only changes the speed). "
+                                           "MiniMax: 24, fixed")
+    p.add_argument("--size", type=int, help="the long side of the clip in pixels (default 640 for Wan, 864 for fasth3, 1280 "
+                                            "for h3); the start image's aspect ratio is kept")
+    p.add_argument("--no-audio", dest="audio", action="store_false",
+                   help="MiniMax: skip the soundtrack it makes with the picture; Wan has none")
     g = p.add_argument_group("rope library", "Clips go into the rope library (see rope/README.md), and so does the start "
                              "image, so that a clip can be made again after it is moved or deleted. rope has to be built first.")
     g.add_argument("--into", metavar="FOLDER",
@@ -280,7 +415,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     try:
         a.request = Request([a.image], a.prompt, model=a.model, count=a.count, seed=a.seed, negative=a.negative,
                             steps=a.steps, cfg=a.cfg, shift=a.shift, lora=a.lora, lightning=a.lightning,
-                            seconds=a.seconds, fps=a.fps, size=a.size, into=a.into, tags=a.tags,
+                            seconds=a.seconds, fps=a.fps, size=a.size, audio=a.audio, into=a.into, tags=a.tags,
                             note=a.note).settled()
     except ValueError as e:
         p.error(str(e))

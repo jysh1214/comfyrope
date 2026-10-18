@@ -22,13 +22,14 @@ BASE = img2vid.Request(
     seconds=5,
     size=640,
     into="tests/motion",  # the prefix of the rope folders: into_setting_loras, see folder()
-    # the rest, with their defaults: negative=None (Wan's own), steps=None, cfg=None, shift=None,
-    # lightning=None ("4"), lora=[], tags=[], note=None
+    # the rest, with their defaults: model="14b" (Wan 2.2; "fasth3" or "h3" is MiniMax H3, with sound, which wants
+    # FPS = [24] and SHIFT near its 10 or 12), negative=None (Wan's own), steps=None, cfg=None, shift=None,
+    # lightning=None ("4"; h3: "8"), lora=[], tags=[], note=None
 )
 
 # 2. The settings to vary: every Lightning setting with every shift and every fps, and every choice of the LoRAs,
 #    each one in or out, the empty choice included (2 ** len(LORAS) choices).
-LIGHTNING = ["4"]  # "4", the 4-step LoRAs (about 1.5 minutes a clip), or "off", the full model (about 9 minutes)
+LIGHTNING = ["4"]  # "4", the 4-step LoRAs (about 1.5 minutes a clip), or "off", the full model (about 9 minutes); h3: "8" or "off"
 SHIFT = [3, 5, 8]  # ModelSamplingSD3's shift; the template's value is 5
 FPS = [16]  # frames per second; 16 is Wan's own rate, another value changes the frame count (seconds * fps) and the speed
 LORAS: list[str] = []  # name[:strength] as on the command line (.safetensors implied); applied to both models

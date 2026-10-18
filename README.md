@@ -3,7 +3,7 @@
 Edit images and make short clips with ComfyUI on this machine, from the command line:
 
 - `img2img.py` — images + prompt → a new image (Qwen-Image-Edit-2511, or Qwen-Image-2.1)
-- `img2vid.py` — one image + prompt → a short clip (Wan 2.2)
+- `img2vid.py` — one image + prompt → a short clip (Wan 2.2, or MiniMax H3 with sound)
 - `rope` / `rope-gui` — the library every input and result goes into, with the recipe that made it
 - `rope-queue` — the queue that starts ComfyUI and runs the jobs one by one
 
@@ -26,6 +26,8 @@ Later: `./install_comfyui.py --ref latest` upgrades ComfyUI. `--dry-run` shows t
 ```bash
 uv run download_models.py all     # the image models for img2img.py: 2511 and 2.1, about 48 GB
 uv run download_models.py wan     # Wan 2.2 for img2vid.py, about 38 GB
+uv run download_models.py h3                           # MiniMax H3 for img2vid.py: FastVideo's 8-step FastH3 with its encoder and VAEs, about 41 GB
+uv run download_models.py h3 --h3-model fasth3 fl2va   # and H3 itself with its 8-step turbo LoRA, another 23 GB
 ```
 
 Downloads from Hugging Face into `models/`. Ctrl-C and run the same command again to continue; files already there are skipped.
@@ -117,13 +119,28 @@ A missing model file is reported with the download command, and the request is s
 
 ## 7. Make a clip
 
+Three models: Wan 2.2 (`-m 14b`, the default) and MiniMax H3 in two forms, FastVideo's 8-step FastH3 (`-m fasth3`) and H3 itself (`-m h3`). The MiniMax ones make a stereo soundtrack with the picture.
+
 ```bash
-./img2vid.py photo.jpg "the camera slowly pushes in while the leaves move in the wind"
-./img2vid.py photo.jpg "..." -n 2 -s 42 --seconds 3 --size 480      # two clips of 3 s, long side 480 px
-./img2vid.py photo.jpg "..." --lightning off                        # the full 20-step model, about five times slower
+./img2vid.py photo.jpg "the camera slowly pushes in while the leaves move in the wind"      # Wan 2.2
+./img2vid.py photo.jpg "..." -n 2 -s 42 --seconds 3 --size 480                              # two clips of 3 s, long side 480 px
+./img2vid.py photo.jpg "..." --lightning off                                                # Wan's full 20-step model, about five times slower
+
+./img2vid.py photo.jpg "她轉頭看向鏡頭，風吹起頭髮，遠處有海浪聲" -m fasth3                      # FastH3: 8 steps, about 480p, with sound
+./img2vid.py photo.jpg "..." -m h3 --seconds 8 --into clips/海邊                             # H3 with its turbo LoRA, about 768p, 8 s
+./img2vid.py photo.jpg "..." -m h3 --lightning off                                          # the full 20-step H3
+./img2vid.py photo.jpg "..." -m fasth3 --no-audio                                           # the picture only
 ```
 
-Default: 5 seconds at 16 fps, long side 640 px, the 4-step LoRAs; about 1.5 minutes per clip on the 4090. Describe the motion: what moves, how the camera moves. `--into`, `--tag`, `--note`, `-n`, `-s` work as for images. `./img2vid.py --help` for the rest.
+| | `-m 14b` Wan 2.2 | `-m fasth3` FastH3 | `-m h3` MiniMax H3 |
+|---|---|---|---|
+| Default | 5 s at 16 fps, long side 640 px, the 4-step LoRAs | 5 s at 24 fps, long side 864 px, 8 steps | 5 s at 24 fps, long side 1280 px, the 8-step turbo LoRA |
+| `--lightning off` | the full model: 20 steps, cfg 3.5 | not for FastH3, distilled already | the full model: 20 steps |
+| Sound | none | yes; `--no-audio` skips it | yes; `--no-audio` skips it |
+| Length | any; `--fps` changes the rate | 5 to 15 s is what it knows; 24 fps, fixed | the same |
+| Time on the 4090, 5 s | about 1.5 min | about 1 min at 480p, 2.5 min at 768p | about 2 min |
+
+Describe the motion: what moves, how the camera moves; for MiniMax, what is heard too. `--into`, `--tag`, `--note`, `-n`, `-s` work as for images. rope-gui plays clips without their sound; the mp4 has it, so open the file outside for the soundtrack. The first MiniMax job after a start loads about 40 GB of models, and switching between Wan, MiniMax and the image models loads them again, so queue the clips of one model together. `./img2vid.py --help` for the rest.
 
 ## 8. Browse the results
 
