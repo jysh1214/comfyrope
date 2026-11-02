@@ -1,4 +1,5 @@
-"""A batch of img2vid runs: the combinations of some settings, made in one go, to compare side by side. A template:
+"""A batch of img2vid runs with MiniMax H3: the combinations of some settings, made in one go, to compare side by side.
+A template:
 copy it, fill in the three numbered parts, and run it from the repo root:
 
     .venv/bin/python run_img2vid.py --list    # only print the batch, after checking every request
@@ -16,22 +17,23 @@ import img2vid
 #    clips differ only by the settings being compared.
 BASE = img2vid.Request(
     images=["photo.jpg"],
-    prompt="",  # the motion: what moves, and how the camera moves; a LoRA's trigger (TRIGGERS) is added where it is in
+    prompt="",  # the motion: what moves, how the camera moves, and what is heard; a LoRA's trigger (TRIGGERS) is added
+    model="h3",  # MiniMax H3 itself, with sound; its 8-step turbo LoRA is LIGHTNING "8"
     count=1,  # clips per combination, one seed each from `seed`
     seed=42,
-    seconds=5,
-    size=640,
+    steps=8,  # the turbo LoRA's 8; 20 for the full model (LIGHTNING "off")
+    seconds=15,  # the top of the 5 to 15 s H3 was trained on; the frames come in 17k+5 at 24 fps, 362 for 15 s
+    size=928,  # the long side, a multiple of 32 as H3 wants its sides (its default is 1280)
     into="tests/motion",  # the prefix of the rope folders: into_setting_loras, see folder()
-    # the rest, with their defaults: model="14b" (Wan 2.2; "fasth3" or "h3" is MiniMax H3, with sound, which wants
-    # FPS = [24] and SHIFT near its 10 or 12), negative=None (Wan's own), steps=None, cfg=None, shift=None,
-    # lightning=None ("4"; h3: "8"), lora=[], tags=[], note=None
+    # the rest, with their defaults: shift=None (SHIFT sets it), lightning=None (LIGHTNING), fps=None (FPS), lora=[],
+    # tags=[], note=None, audio=True; cfg and negative are Wan's and stay None
 )
 
 # 2. The settings to vary: every Lightning setting with every shift and every fps, and every choice of the LoRAs,
 #    each one in or out, the empty choice included (2 ** len(LORAS) choices).
-LIGHTNING = ["4"]  # "4", the 4-step LoRAs (about 1.5 minutes a clip), or "off", the full model (about 9 minutes); h3: "8" or "off"
-SHIFT = [3, 5, 8]  # ModelSamplingSD3's shift; the template's value is 5
-FPS = [16]  # frames per second; 16 is Wan's own rate, another value changes the frame count (seconds * fps) and the speed
+LIGHTNING = ["8"]  # "8", H3's 8-step turbo LoRA (about 2 minutes a 5 s clip at 768p), or "off", the full 20-step model
+SHIFT = [12]  # the sampling shift; H3's default is 12
+FPS = [24]  # frames per second: 24 is MiniMax H3's own rate, fixed
 LORAS: list[str] = []  # name[:strength] as on the command line (.safetensors implied); applied to both models
 TRIGGERS: dict[str, str] = {}  # LoRA name (no strength, no .safetensors) -> the prompt its author asks for
 
@@ -82,7 +84,7 @@ def main() -> None:
     if "--list" in sys.argv[1:]:
         for n, r in enumerate(requests, start=1):
             loras = ", ".join(f"{name}:{strength:g}" for name, strength in r.lora) or "none"
-            print(f"#{n} {r.into}: Lightning {r.lightning}, {r.steps} steps, cfg {r.cfg:g}, shift {r.shift:g}, "
+            print(f"#{n} {r.into}: Lightning {r.lightning}, {r.steps} steps, shift {r.shift:g}, "
                   f"{r.seconds:g} s at {r.fps} fps, {r.size} px, seed {r.seed}, LoRA {loras}; prompt {r.prompt!r}")
         folders = dict.fromkeys(r.into for r in requests)
         print(f"{len(requests)} requests, {sum(r.count for r in requests)} clips, {len(folders)} folders")
