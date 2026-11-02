@@ -37,8 +37,7 @@ ComfyUI/output/img2vid/.
 On the RTX 4090 at 640 px and 5 s, ComfyUI's own template notes about 1.5 minutes per clip with the 4-step
 LoRAs (the first one longer: 30 GB of models to load) and about 9 minutes without. FastVideo measured a 5-second
 FastH3 clip at about 55 s at 480p and 155 s at 768p; H3 with its turbo LoRA takes about 2 minutes at 768p. MiniMax
-loads about 40 GB of models, and so does switching between it and Wan. rope-gui plays clips without their sound;
-the mp4 has it.
+loads about 40 GB of models, and so does switching between it and Wan.
 """
 from __future__ import annotations
 

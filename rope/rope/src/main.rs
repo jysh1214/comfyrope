@@ -7,7 +7,7 @@ use rope_core::hash::short;
 use rope_core::lineage::Lineage;
 use rope_core::purge::Holder;
 use rope_core::store::{self, NewImage};
-use rope_core::{Library, Meta, check, journal, prompts, purge, repro, time};
+use rope_core::{Library, Meta, check, crop, journal, prompts, purge, repro, time};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -21,6 +21,7 @@ Examples:
   rope ls trips/kyoto -l
   rope show 3fa9c1
   rope repro 3fa9c1                 # the command that makes it again
+  rope crop 3fa9c1 400 0 1080 1920  # a 9:16 cut of it: a new image made from it
   rope tag add 海邊 @3fa9c1 @9b2e0f
   rope fav @3fa9c1                  # a favorite: rope-gui shows it first
   rope mv @3fa9c1 @9b2e0f portraits # images into a folder; / is unfiled
@@ -221,6 +222,25 @@ enum Cmd {
         /// The full img2img.py command instead, to change and run as a variation
         #[arg(long)]
         command: bool,
+    },
+    /// Cut a rectangle out of an image: a new image made from it, kept as PNG, with the rectangle as its recipe
+    Crop {
+        id: String,
+        /// The top-left corner and the size, in pixels of the image as shown upright
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        /// The folder for the crop [default: the image's own]
+        #[arg(long, value_name = "FOLDER")]
+        into: Option<String>,
+        /// The display name [default: the image's name and "crop"]
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Put images in the trash
     Rm {
@@ -428,6 +448,17 @@ fn run(cli: Cli) -> Result<()> {
             };
             emit(json, json!({"argv": argv, "command": repro::shell_join(&argv)}), || {
                 println!("{}", repro::shell_join(&argv))
+            })
+        }
+        Cmd::Crop { id, x, y, width, height, into, name, tags, note } => {
+            let sha = store::resolve(&lib, &id)?;
+            let folder = into_folder(&lib, into.as_deref())?;
+            let new = NewImage { name, via: "rope".into(), folder, tags, note, ..Default::default() };
+            let added = crop::crop(&lib, &sha, crop::Rect { x, y, width, height }, &new)?;
+            let meta = store::load(&lib, &added.sha)?;
+            emit(json, store::added_json(&lib, &meta, added.created, added.restored)?, || {
+                let same = if added.created { "" } else { "  (this crop was in rope already)" };
+                println!("{}  {}{same}", meta.short(), store::image_path(&lib, &meta).display())
             })
         }
         Cmd::Rm { ids } => {
@@ -840,7 +871,9 @@ fn show(lib: &Library, json: bool, id: &str, downstream: bool) -> Result<()> {
         let gone = if Path::new(&s.path).exists() { "" } else { "  (gone)" };
         println!("  source   {}{gone}", s.path);
     }
-    if meta.made.is_some() {
+    if let Some(rect) = meta.crop() {
+        println!("  crop     {rect} of its upstream image");
+    } else if meta.made.is_some() {
         println!("  recipe   {}", repro::shell_join(&meta.flags()));
         if let Some(p) = meta.made_str("prompt") {
             println!("  prompt   {}", p.replace('\n', "\n           "));

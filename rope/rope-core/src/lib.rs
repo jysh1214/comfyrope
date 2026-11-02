@@ -24,6 +24,8 @@
 pub mod atomic;
 pub mod catalog;
 pub mod check;
+pub mod crop;
+pub mod decode;
 pub mod hash;
 pub mod journal;
 pub mod library;

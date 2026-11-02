@@ -140,7 +140,7 @@ Three models: Wan 2.2 (`-m 14b`, the default) and MiniMax H3 in two forms, FastV
 | Length | any; `--fps` changes the rate | 5 to 15 s is what it knows; 24 fps, fixed | the same |
 | Time on the 4090, 5 s | about 1.5 min | about 1 min at 480p, 2.5 min at 768p | about 2 min |
 
-Describe the motion: what moves, how the camera moves; for MiniMax, what is heard too. `--into`, `--tag`, `--note`, `-n`, `-s` work as for images. rope-gui plays clips without their sound; the mp4 has it, so open the file outside for the soundtrack. The first MiniMax job after a start loads about 40 GB of models, and switching between Wan, MiniMax and the image models loads them again, so queue the clips of one model together. `./img2vid.py --help` for the rest.
+Describe the motion: what moves, how the camera moves; for MiniMax, what is heard too. `--into`, `--tag`, `--note`, `-n`, `-s` work as for images. rope-gui plays them with their sound, and has Mute and a volume slider under the clip. The first MiniMax job after a start loads about 40 GB of models, and switching between Wan, MiniMax and the image models loads them again, so queue the clips of one model together. `./img2vid.py --help` for the rest.
 
 ## 8. Browse the results
 
@@ -148,7 +148,7 @@ Describe the motion: what moves, how the camera moves; for MiniMax, what is hear
 rope-gui                 # or rope/target/release/rope-gui
 ```
 
-Folders and tags on the left, thumbnails in the middle, the selected image on the right with its recipe. Double-click for the large view; clips play. The **Queue** button at the top right shows what rope-queue is doing, with cancel, retry, pause, Cancel all and Clear finished.
+Folders and tags on the left, thumbnails in the middle, the selected image on the right with its recipe. Double-click for the large view, where C crops the image to a rectangle, as a new image made from it; clips play, with their sound, Mute and a volume slider under them. The **Queue** button at the top right shows what rope-queue is doing, with cancel, retry, pause, Cancel all and Clear finished.
 
 The same from the terminal: `rope ls trips/京都`, `rope show 3fa9c1`, `rope tree`, `rope mv`, `rope tag`, `rope rm`. `rope --help`. Everything about the library, the GUI, deleting and backups is in [rope/README.md](rope/README.md).
 

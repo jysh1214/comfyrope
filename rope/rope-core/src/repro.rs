@@ -4,13 +4,18 @@
 //! the comfyrope repo from the library's REPO file; the copied commands are built when asked for.
 
 use crate::catalog::shell_word;
+use crate::crop::Rect;
 use crate::{Library, Meta};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 /// The repro.sh of an image or clip with a recipe: it runs the tool that made it (`img2img.py`, `img2vid.py`)
-/// with `--replay` on this item, passing on its arguments. The comments say what the recipe was.
+/// with `--replay` on this item, passing on its arguments. The comments say what the recipe was. For a crop, it
+/// runs `rope crop` on the original with the same rectangle.
 pub fn script(meta: &Meta) -> String {
+    if let Some(rect) = meta.crop() {
+        return crop_script(meta, rect);
+    }
     let made = meta.made.as_ref();
     let get = |key: &str| made.and_then(|m| m.get(key));
     let (tool, kind) = (meta.tool(), if meta.is_clip() { "clip" } else { "image" });
@@ -83,10 +88,33 @@ py="$repo/.venv/bin/python3"
     s
 }
 
+/// The repro.sh of a crop: `rope crop` on the original with the same rectangle, which makes the same bytes, so
+/// rope answers with this image rather than making another. The rope binary is `$ROPE`, the repo's build, or
+/// the one on the PATH, as img2img.py looks for it.
+fn crop_script(meta: &Meta, rect: Rect) -> String {
+    let at = meta.made_str("at").unwrap_or(&meta.added);
+    let original = meta.upstream().into_iter().next();
+    let short = original.as_deref().map_or("missing", crate::hash::short).to_owned();
+    let mut s = String::from("#!/bin/sh\n");
+    s += &format!("# Makes rope image {} again: {}\n", meta.short(), clean(&meta.name));
+    s += &format!("# Made {at}: {rect} of image {short}\n");
+    s += "# The same crop of the same image is the same bytes, so rope finds this image rather than making another.\n";
+    s += r#"lib=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
+rope="${ROPE:-}"
+[ -x "$rope" ] || rope="$(cat "$lib/REPO" 2>/dev/null)/rope/target/release/rope"
+[ -x "$rope" ] || rope=rope
+"#;
+    s += &format!("exec \"$rope\" --library \"$lib\" crop @{short} {} \"$@\"\n", rect.args().join(" "));
+    s
+}
+
 /// The command that replays an image: what "copy repro" copies.
 pub fn replay_argv(lib: &Library, meta: &Meta) -> Result<Vec<String>> {
     if meta.made.is_none() {
         bail!("{} has no recipe: rope did not see it being made", meta.short());
+    }
+    if let Some(rect) = meta.crop() {
+        return crop_argv(lib, meta, rect, None);
     }
     let mut argv = tool(lib, meta.tool())?;
     if !lib.is_default() {
@@ -102,6 +130,9 @@ pub fn command_argv(lib: &Library, meta: &Meta, folder: Option<&str>) -> Result<
     if meta.made.is_none() {
         bail!("{} has no recipe: rope did not see it being made", meta.short());
     }
+    if let Some(rect) = meta.crop() {
+        return crop_argv(lib, meta, rect, folder);
+    }
     let mut argv = tool(lib, meta.tool())?;
     if !lib.is_default() {
         argv.push(format!("--library={}", lib.root().display()));
@@ -116,6 +147,26 @@ pub fn command_argv(lib: &Library, meta: &Meta, folder: Option<&str>) -> Result<
         argv.push(format!("@{}", crate::hash::short(id)));
     }
     argv.push(meta.made_str("prompt").unwrap_or_default().to_owned());
+    Ok(argv)
+}
+
+/// The `rope crop` command that makes a crop again: the original and the rectangle, and `--into` for `folder`.
+fn crop_argv(lib: &Library, meta: &Meta, rect: Rect, folder: Option<&str>) -> Result<Vec<String>> {
+    let original = meta
+        .upstream()
+        .into_iter()
+        .next()
+        .with_context(|| format!("the recipe of {} does not say what it was cropped from", meta.short()))?;
+    let mut argv = vec!["rope".to_owned()];
+    if !lib.is_default() {
+        argv.push(format!("--library={}", lib.root().display()));
+    }
+    argv.push("crop".into());
+    argv.push(format!("@{}", crate::hash::short(&original)));
+    argv.extend(rect.args());
+    if let Some(f) = folder.filter(|f| !f.is_empty()) {
+        argv.push(format!("--into={f}"));
+    }
     Ok(argv)
 }
 
@@ -189,6 +240,34 @@ mod tests {
             meta.made.as_mut().unwrap()["by"] = json!(bad);
             assert_eq!(meta.tool(), "img2img.py", "{bad}");
         }
+    }
+
+    #[test]
+    fn a_crops_script_and_commands_run_rope_crop_on_the_original() {
+        let mut meta = made_meta();
+        let original = "9b2e0f1a2b3c".repeat(5) + "abcd";
+        meta.made = Some(json!({"by": "rope", "at": "2026-11-02T10:00:00+08:00",
+                                "crop": {"x": 10, "y": 20, "width": 300, "height": 400}, "inputs": [{"id": original}]}));
+        let s = script(&meta);
+        assert!(s.contains("# Made 2026-11-02T10:00:00+08:00: 300x400 at 10,20 of image 9b2e0f1a2b3c\n"), "{s}");
+        let code: Vec<&str> = s.lines().filter(|l| !l.starts_with('#')).collect();
+        assert!(code.last().unwrap().ends_with("crop @9b2e0f1a2b3c 10 20 300 400 \"$@\""), "{s}");
+        assert!(!s.contains("img2img.py") && !s.contains("--replay"), "{s}");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("repro.sh"), &s).unwrap();
+        assert!(
+            std::process::Command::new("sh").arg("-n").arg(dir.path().join("repro.sh")).status().unwrap().success()
+        );
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let library = format!("--library={}", lib.root().display());
+        let want = ["rope", &library, "crop", "@9b2e0f1a2b3c", "10", "20", "300", "400"];
+        assert_eq!(replay_argv(&lib, &meta).unwrap(), want);
+        let mut with_folder = want.to_vec();
+        with_folder.push("--into=trips/京都");
+        assert_eq!(command_argv(&lib, &meta, Some("trips/京都")).unwrap(), with_folder);
+        assert_eq!(command_argv(&lib, &meta, Some("")).unwrap(), want);
+        meta.made.as_mut().unwrap()["inputs"] = json!([]);
+        assert!(replay_argv(&lib, &meta).unwrap_err().to_string().contains("cropped from"));
     }
 
     #[test]

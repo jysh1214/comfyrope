@@ -18,7 +18,7 @@ Three crates in one Cargo workspace:
 
 ## Building and installing
 
-Run these from the repo root. rope needs Rust 1.89 or newer, for the standard library's file locks. The GUI also needs libheif (for HEIC and AVIF) and the Noto Sans CJK fonts (for Chinese text); both are installed on this machine.
+Run these from the repo root. rope needs Rust 1.89 or newer, for the standard library's file locks, and libheif (for HEIC and AVIF: the GUI shows them and `rope crop` reads them). The GUI also needs the Noto Sans CJK fonts (for Chinese text). Both are installed on this machine.
 
 ### Build only
 
@@ -114,6 +114,7 @@ An image's id is the SHA-256 of its file:
 | `rope prompt add TITLE [TEXT \| --from ID]`, `rope prompt ls`, `rope prompt show NAME`, `rope prompt edit NAME [--title T] [--text T] [-e]`, `rope prompt mv NAME N`, `rope prompt rm NAME` | Keep prompts to use again. `show` prints the text, so `"$(rope prompt show 黃昏海邊)"` puts it in a command; `--from` takes the prompt an image was made with; `mv` puts it at position N; NAME is a title or an id |
 | `rope lineage ID [--up \| --down]` | The tree of images above or below |
 | `rope repro ID [--command]` | Print the command that makes the image again; `--command` prints the full command of the tool that made it (`img2img.py`, `img2vid.py`), to change and run as a variation |
+| `rope crop ID X Y W H [--into F] [--name N] [--tag T]... [--note T]` | Cut a rectangle out of an image, given its top-left corner and size in pixels of the image as shown upright: a new image made from ID, as PNG, named 〈name〉 crop and in ID's folder unless told otherwise. The rectangle is its recipe, so `rope repro` gives the same `rope crop` back; the same crop made again finds the image already there |
 | `rope rm ID...`, `rope restore ID...` | Move images to the trash, or back out |
 | `rope purge ID... \| --trash [--break-lineage]` | Delete for good; see [Deleting](#deleting) |
 | `rope check [--hash] [--fix]` | Check the library; `--hash` verifies every file against its hash; `--fix` repairs the catalog, writes outdated `repro.sh` again and makes a clip's missing poster frame and length |
@@ -143,7 +144,7 @@ The window runs on its own: the command returns at once, and closing the termina
 - A star in a thumbnail's top-right corner marks it as a favorite: gold when it is one, an outline on hover otherwise. Click it, or press L.
 - A clip shows its first frame, with a play mark and its length in the bottom-left corner.
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
-- Right-click to copy the path or the repro command, view large, open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
+- Right-click to copy the path or the repro command, view large, crop (below), open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
 - Drag a thumbnail onto a folder on the left to move it there; the selection drags together, with a ghost of the first image and the count at the pointer. Unfiled takes drops too, and so do a tag, which adds it, and the trash. A closed folder opens after half a second under the pointer, the list scrolls when the pointer is near its top or bottom, and Esc lets go.
 - **Move to…** (in that menu, on M, and as the Folder button on the right) opens a dialog over the folders: type part of a path and the list narrows to the folders that have it, the ones whose own name starts with it first; ↑ ↓ pick, Enter moves, or click one. With nothing typed, the folders moved to lately come first. A path no folder has yet is made on Enter, with the folders on the way to it.
 
@@ -173,7 +174,9 @@ The window runs on its own: the command returns at once, and closing the termina
 | Esc | Clear the selection, and the folder pick |
 | F5 | Reload |
 
-**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and a bar under the clip has Play/Pause, a progress bar across the width, which also shows how much of the clip is decoded yet, and the position; click or drag the progress bar to go to a frame. Open externally hands a clip to the default video player.
+**The large view** shows one image as large as the window allows, on a dark background, with a bar for stepping, zooming, the details panel and the default image viewer. It decodes images up to 4096 pixels on a side, and keeps only a few of them on the GPU, which ComfyUI needs more. A clip plays as soon as it opens, round and round: the `ffmpeg` on the system decodes it into memory (a clip whose frames would take more than about 768 MB is decoded smaller), Space pauses and plays, and a bar under the clip has Play/Pause, a progress bar across the width, which also shows how much of the clip is decoded yet, and the position; click or drag the progress bar to go to a frame. A clip's sound plays with it, through the default output device, decoded by a second `ffmpeg`; Mute (S) and a volume slider sit beside Play/Pause, and a clip without sound says so. Open externally hands a clip to the default video player.
+
+**Crop** (C, the Crop button in the bar, or Crop… in a thumbnail's right-click menu) cuts a rectangle out of the image. Drag on the image to pick the area to keep; drag inside it to move it, its corners and edges to resize it; the right mouse button pans while zoomed. The bar under the top one has the ratio the rectangle keeps (Free, the image's own, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3; picking one takes the rectangle drawn to it, about its center) and the rectangle's size and place in pixels. Enter, or the Crop button, makes a new image of it, a PNG, in the image's folder, named 〈name〉 crop and made from the image, so it has the image as its upstream and `rope crop` with the rectangle as its recipe; the view then goes to the new image, and the original stays as it was, as every file in the library does. Esc leaves crop mode. A clip cannot be cropped. The same crop made twice is the same bytes, so rope finds the first one instead of making another.
 
 | Key or mouse | Action |
 |---|---|
@@ -185,6 +188,8 @@ The window runs on its own: the command returns at once, and closing the termina
 | F | Fit to the window |
 | + − | Zoom in / out |
 | I | Show or hide the details panel |
+| C | Crop mode: drag a rectangle to keep, Enter makes it a new image, Esc leaves |
+| S | Sound on or off for clips; the volume slider under the clip sets how loud. Both hold for the session |
 | L | Mark or unmark the image as a favorite; the order of stepping stays as it was when the view opened |
 | M | Move the image to a folder: the Move to… dialog |
 | Delete, Backspace | Move to the trash and go on to the next image (Undo in the status bar) |
@@ -251,7 +256,7 @@ The daemon takes `--library DIR`, `--repo DIR`, `--server HOST:PORT` (default 12
 
 ## Reproducing an image
 
-Copy repro and `rope repro ID` both give `img2img.py --replay ID`, or `img2vid.py --replay ID` for a clip: the tool that made the item, by its recipe. Each item's `repro.sh` runs the same command. It finds the library from its own location and the repo from the library's `REPO` file, so moving the inputs, the repo or the library does not break it.
+Copy repro and `rope repro ID` both give `img2img.py --replay ID`, or `img2vid.py --replay ID` for a clip: the tool that made the item, by its recipe. Each item's `repro.sh` runs the same command. It finds the library from its own location and the repo from the library's `REPO` file, so moving the inputs, the repo or the library does not break it. For a crop, both give `rope crop @ORIGINAL X Y W H`, which makes the same bytes, so rope answers with the image itself; its `repro.sh` finds `rope` as `img2img.py` does: `$ROPE`, the repo's build, then the `PATH`.
 
 `--replay` does this, in order:
 

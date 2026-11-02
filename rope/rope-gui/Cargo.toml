@@ -7,11 +7,11 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+cpal = "0.18"
 eframe = "0.33"
 egui_extras = "0.33"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 libc = "0.2"
-libheif-rs = "2.7"
 notify = "8"
 rfd = "0.17"
 rope-core = { version = "0.1.0", path = "../rope-core" }

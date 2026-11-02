@@ -146,6 +146,11 @@ impl Meta {
         }
     }
 
+    /// The rectangle this image was cut from its input with, for a crop (see `crop`).
+    pub fn crop(&self) -> Option<crate::crop::Rect> {
+        self.made.as_ref().and_then(crate::crop::Rect::from_recipe)
+    }
+
     /// The recipe's flags, as argv items.
     pub fn flags(&self) -> Vec<String> {
         self.made

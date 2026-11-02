@@ -139,9 +139,19 @@ enum Action {
     Zoom(Option<f32>),
     ZoomBy(f32),
     ToggleInfo,
+    /// Crop mode in the large view: into it or out of it, on this image from the grid, the ratio the rectangle
+    /// keeps, and making the new image of the rectangle picked.
+    ToggleCrop,
+    StartCrop(String),
+    CropRatio(viewer::Ratio),
+    CropApply,
     /// The clip being looked at: play or pause it, and go to one of its frames.
     PlayPause,
     Seek(usize),
+    /// Sound on or off for every clip.
+    Mute,
+    /// The volume of every clip, 0 to 1.
+    Volume(f32),
     /// Mark these images as favorites, or, when all of them are already, unmark them.
     ToggleFavorite(Vec<String>),
     /// Edit the prompt with this id on the Prompts page.
@@ -182,6 +192,8 @@ pub struct App {
     undo: Option<(String, Vec<String>)>,
     dialog: Option<Dialog>,
     tasks: Vec<Receiver<Result<String, String>>>,
+    /// A crop being made in the background; `poll` looks at the new image when it is in.
+    cropping: Option<Receiver<anyhow::Result<store::Added>>>,
     scroll_to: Option<String>,
     open_on_load: Option<String>,
     /// Where images were moved to lately, the latest first; None is unfiled. The Move to dialog lists them first.
@@ -199,6 +211,9 @@ pub struct App {
     prompt_rects: Vec<(String, Rect)>,
     /// The Queue page: what the daemon says over its socket, and what is selected there.
     queue: queue::Live,
+    /// How loud clips play, 0 to 1, and whether they are muted: for the session, every clip alike.
+    volume: f32,
+    muted: bool,
 }
 
 impl App {
@@ -244,6 +259,7 @@ impl App {
             undo: None,
             dialog: None,
             tasks: Vec::new(),
+            cropping: None,
             scroll_to: None,
             open_on_load: open,
             recent_folders: Vec::new(),
@@ -254,6 +270,8 @@ impl App {
             prompt_drag: None,
             prompt_rects: Vec::new(),
             queue,
+            volume: 1.0,
+            muted: false,
         };
         match watcher {
             Ok(w) => app._watcher = Some(w),
@@ -297,6 +315,27 @@ impl App {
         }
         if changed {
             self.refresh();
+        }
+        if let Some(rx) = &self.cropping
+            && let Ok(result) = rx.try_recv()
+        {
+            self.cropping = None;
+            self.refresh();
+            match result {
+                Ok(added) => {
+                    let name = short(&added.sha);
+                    let text = if added.created {
+                        format!("cropped: {name}")
+                    } else {
+                        format!("this crop was in rope already: {name}")
+                    };
+                    self.say(text, false);
+                    if self.viewer.is_some() && self.model().items.contains_key(&added.sha) {
+                        self.look(added.sha);
+                    }
+                }
+                Err(e) => self.say(format!("cannot crop: {e:#}"), true),
+            }
         }
         let mut messages = Vec::new();
         self.tasks.retain(|rx| match rx.try_recv() {
@@ -377,6 +416,18 @@ impl App {
         });
     }
 
+    /// The gain clips play at: the volume, or 0 while muted.
+    fn gain(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    /// Passes the gain on to the clip playing, if one is.
+    fn tell_gain(&self) {
+        if let Some(p) = self.viewer.as_ref().and_then(|v| v.player.as_ref()) {
+            p.set_gain(self.gain());
+        }
+    }
+
     // ---------------------------------------------------------------- actions
 
     fn apply(&mut self, action: Action, ctx: Option<&egui::Context>) {
@@ -405,6 +456,13 @@ impl App {
                 self.refresh();
             }
             Action::CopyText(text) => self.copy(ctx, text, "the prompt"),
+            Action::ToggleCrop => self.toggle_crop(),
+            Action::StartCrop(id) => {
+                self.look(id);
+                self.toggle_crop();
+            }
+            Action::CropRatio(ratio) => self.set_crop_ratio(ratio),
+            Action::CropApply => self.apply_crop(ctx),
             Action::Queue(act) => self.queue_act(act, ctx)?,
             Action::Select(id, pick) => {
                 self.picked_folders.clear();
@@ -613,6 +671,15 @@ impl App {
                 if let Some(p) = self.viewer.as_mut().and_then(|v| v.player.as_mut()) {
                     p.seek(frame);
                 }
+            }
+            Action::Mute => {
+                self.muted = !self.muted;
+                self.tell_gain();
+            }
+            Action::Volume(v) => {
+                self.volume = v.clamp(0.0, 1.0);
+                self.muted = false;
+                self.tell_gain();
             }
             Action::Undo => {
                 if let Some((what, ids)) = self.undo.take()
@@ -1121,6 +1188,16 @@ impl App {
                 actions.push(Action::Look(id.to_owned()));
                 ui.close();
             }
+            let image = model.items.get(id).is_some_and(|i| i.video.is_none());
+            if ui
+                .add_enabled(image, egui::Button::new("Crop…"))
+                .on_hover_text("pick a rectangle to keep as a new image, made from this one")
+                .on_disabled_hover_text("a clip cannot be cropped")
+                .clicked()
+            {
+                actions.push(Action::StartCrop(id.to_owned()));
+                ui.close();
+            }
             if ui.button("Open in external viewer").clicked() {
                 actions.push(Action::External(id.to_owned()));
                 ui.close();
@@ -1247,20 +1324,21 @@ impl App {
                 actions.push(Action::CopyPath(id.clone()));
             }
             ui.add_enabled_ui(m.made.is_some(), |ui| {
-                if ui
-                    .button("Copy repro")
-                    .on_hover_text("the command that makes this image again (img2img.py --replay)")
-                    .on_disabled_hover_text(NO_RECIPE)
-                    .clicked()
-                {
+                let cropped = m.crop().is_some();
+                let repro = if cropped {
+                    "the rope crop command that makes this image again"
+                } else {
+                    "the command that makes this image again (img2img.py --replay)"
+                };
+                if ui.button("Copy repro").on_hover_text(repro).on_disabled_hover_text(NO_RECIPE).clicked() {
                     actions.push(Action::CopyRepro(id.clone()));
                 }
-                if ui
-                    .button("Copy command")
-                    .on_hover_text("the full img2img.py command, to change and run as a variation")
-                    .on_disabled_hover_text(NO_RECIPE)
-                    .clicked()
-                {
+                let command = if cropped {
+                    "the rope crop command, to change and run as a variation"
+                } else {
+                    "the full img2img.py command, to change and run as a variation"
+                };
+                if ui.button("Copy command").on_hover_text(command).on_disabled_hover_text(NO_RECIPE).clicked() {
                     actions.push(Action::CopyCommand(id.clone()));
                 }
             });
@@ -1386,6 +1464,17 @@ impl App {
             }
             let command = d.command.as_ref().map(|(_, c)| c.as_str()).unwrap_or_default();
             ui.add(egui::Label::new(RichText::new(command).monospace().small()).wrap());
+            if let Some(r) = m.crop() {
+                ui.add_space(6.0);
+                section(ui, "Crop");
+                ui.label(
+                    RichText::new(format!(
+                        "{}×{} at {}, {} of the image it was made from",
+                        r.width, r.height, r.x, r.y
+                    ))
+                    .small(),
+                );
+            }
             if let Some(p) = made.get("prompt").and_then(|v| v.as_str()) {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -2521,6 +2610,77 @@ mod tests {
         press(&ctx, &mut app, egui::Key::Backspace);
         assert!(rope_core::Catalog::load(&lib).unwrap().is_trashed(&order[2]));
         let _ = (a, b, c);
+    }
+
+    #[test]
+    fn the_large_view_crops_an_image_into_a_new_one_made_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let folder = store::edit_catalog(&lib, "mkdir", &[], |c| c.mkdir("trips", false)).unwrap();
+        // every pixel says where it is, in steps of two
+        let path = dir.path().join("photo.png");
+        image::RgbImage::from_fn(400, 300, |x, y| image::Rgb([(x / 2) as u8, (y / 2) as u8, 9])).save(&path).unwrap();
+        let new = NewImage { via: "import".into(), folder: Some(Some(folder.clone())), ..Default::default() };
+        let original = store::add(&lib, &path, &new).unwrap().sha;
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 1);
+        app.apply(Action::Look(original.clone()), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: original.clone(), size: thumbs::VIEW }));
+
+        // C enters crop mode; Enter with nothing picked does nothing; arrows do not step away
+        press(&ctx, &mut app, egui::Key::C);
+        assert!(app.viewer.as_ref().unwrap().crop.is_some());
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert!(app.viewer.as_ref().unwrap().crop.is_some() && app.cropping.is_none());
+        press(&ctx, &mut app, egui::Key::ArrowRight);
+        assert_eq!(app.viewer.as_ref().unwrap().id, original);
+
+        // a drag over the image picks the rectangle under it, in the image's pixels
+        let drawn = app.viewer.as_ref().unwrap().crop.as_ref().unwrap().drawn;
+        assert!(drawn.width() > 100.0, "the image is drawn: {drawn:?}");
+        let (from, to) = (drawn.min + drawn.size() * 0.25, drawn.min + drawn.size() * 0.75);
+        drag(&ctx, &mut app, from, to);
+        let c = app.viewer.as_ref().unwrap().crop.as_ref().unwrap();
+        let rect = c.rect.expect("a rectangle was dragged out");
+        assert_eq!(c.size, Some((400, 300)));
+        assert!((rect.min - egui::Pos2::new(100.0, 75.0)).length() < 1.0, "{rect:?}");
+        assert!((rect.max - egui::Pos2::new(300.0, 225.0)).length() < 1.0, "{rect:?}");
+
+        // a ratio takes the rectangle to it; dragging its right edge keeps the ratio
+        app.apply(Action::CropRatio(viewer::Ratio::Square), Some(&ctx));
+        let rect = app.viewer.as_ref().unwrap().crop.as_ref().unwrap().rect.unwrap();
+        assert!((rect.width() - rect.height()).abs() < 0.01, "{rect:?}");
+        app.apply(Action::CropRatio(viewer::Ratio::Free), Some(&ctx));
+
+        // Enter makes the new image: made from the original, in its folder, named after it, of the pixels
+        // under the rectangle; the view goes to it
+        let want = viewer::whole(rect, (400, 300));
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert!(app.viewer.as_ref().unwrap().crop.is_none() && app.cropping.is_some());
+        frames_until(&ctx, &mut app, |a| a.cropping.is_none() && a.visible.len() == 2);
+        let id = app.viewer.as_ref().unwrap().id.clone();
+        assert_ne!(id, original);
+        let meta = store::load(&lib, &id).unwrap();
+        assert_eq!(meta.upstream(), std::slice::from_ref(&original));
+        assert_eq!(meta.name, "photo crop");
+        assert_eq!(meta.crop(), Some(want));
+        assert_eq!((meta.image.width, meta.image.height), (Some(want.width), Some(want.height)));
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().entry(&id).folder, Some(folder));
+        let img = rope_core::decode::open(&store::image_path(&lib, &meta)).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 0).0, [(want.x / 2) as u8, (want.y / 2) as u8, 9]);
+        assert!(app.status.as_ref().is_some_and(|(t, err, _)| t.starts_with("cropped: ") && !err), "{:?}", app.status);
+
+        // the recipe panel shows the rope crop command; the original is still there, untouched
+        let argv = repro::command_argv(&lib, &meta, Some("trips")).unwrap();
+        assert_eq!(&argv[2..4], ["crop".to_owned(), format!("@{}", short(&original))]);
+        assert!(store::load(&lib, &original).unwrap().made.is_none());
+
+        // from the grid, Crop… opens the large view in crop mode; a clip cannot be cropped
+        press(&ctx, &mut app, egui::Key::Escape);
+        assert!(app.viewer.is_none());
+        app.apply(Action::StartCrop(original.clone()), Some(&ctx));
+        assert!(app.viewer.as_ref().is_some_and(|v| v.id == original && v.crop.is_some()));
     }
 
     #[test]
