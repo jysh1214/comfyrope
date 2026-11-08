@@ -177,19 +177,35 @@ impl Catalog {
         let id = self.resolve(from)?.context("the top cannot be moved")?;
         let mut names: Vec<&str> = split(to).collect();
         let name = names.pop().context("the new path needs a name")?;
-        check_name(name)?;
         let parent = self.resolve(&names.join("/"))?;
+        self.place(&id, name, parent)
+    }
+
+    /// Puts the folder `id` under `parent` (`None`: the top), keeping its name: what dropping a folder on another
+    /// does. Its images and subfolders come along, since they point at its id.
+    pub fn set_parent(&mut self, id: &str, parent: Option<String>) -> Result<()> {
+        let name = self.folders.get(id).with_context(|| format!("no folder with id {id}"))?.name.clone();
+        self.place(id, &name, parent)
+    }
+
+    /// Gives the folder `id` this name and parent: not into itself, and not where a folder of that name is.
+    fn place(&mut self, id: &str, name: &str, parent: Option<String>) -> Result<()> {
+        check_name(name)?;
         if let Some(p) = &parent
-            && (*p == id || self.ancestors(p).contains(&id))
+            && (p == id || self.ancestors(p).iter().any(|a| a == id))
         {
-            bail!("cannot move {from:?} into itself");
+            bail!("cannot move {:?} into itself", self.folder_path(id));
         }
         if let Some(other) = self.child(parent.as_deref(), name)
             && other != id
         {
+            let to = match &parent {
+                Some(p) => format!("{}/{name}", self.folder_path(p)),
+                None => name.to_owned(),
+            };
             bail!("folder {to:?} exists");
         }
-        let f = self.folders.get_mut(&id).expect("resolved");
+        let f = self.folders.get_mut(id).expect("present");
         f.name = name.to_owned();
         f.parent = parent;
         Ok(())
@@ -480,6 +496,26 @@ mod tests {
         c.mkdir("c", false).unwrap();
         assert!(c.move_folder("a", "a/b/a").is_err());
         assert!(c.move_folder("a", "c").is_err());
+    }
+
+    #[test]
+    fn set_parent_moves_a_folder_under_another_or_to_the_top_and_keeps_its_name() {
+        let mut c = Catalog::default();
+        let b = c.mkdir("a/b", true).unwrap();
+        let a = c.find("a").unwrap().unwrap();
+        let x = c.mkdir("x", false).unwrap();
+        c.mkdir("x/b", false).unwrap();
+        c.set_folder("img", Some(b.clone()));
+        c.set_parent(&a, Some(x.clone())).unwrap();
+        assert_eq!(c.folder_path(&b), "x/a/b");
+        assert_eq!(c.entry("img").folder.as_deref(), Some(b.as_str()), "the image stays in b");
+        let err = c.set_parent(&x, Some(b.clone())).unwrap_err().to_string();
+        assert!(err.contains("into itself"), "{err}");
+        let err = c.set_parent(&b, Some(x.clone())).unwrap_err().to_string();
+        assert!(err.contains("\"x/b\" exists"), "{err}");
+        c.set_parent(&b, None).unwrap();
+        assert_eq!(c.folder_path(&b), "b");
+        assert!(c.set_parent("nope", None).is_err());
     }
 
     #[test]

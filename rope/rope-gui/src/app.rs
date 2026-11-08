@@ -67,18 +67,39 @@ enum Dialog {
     DeletePrompt {
         id: String,
     },
-    /// Moving images to a folder: a search over every folder's path, the recent targets first; `pick` is the
-    /// choice the arrow keys are on.
+    /// Moving images, or folders, to a folder: a search over every folder's path, the recent targets first;
+    /// `pick` is the choice the arrow keys are on.
     MoveTo {
-        ids: Vec<String>,
+        what: Moving,
         search: String,
         pick: usize,
     },
 }
 
+/// What the Move to dialog moves: images into a folder, or folders under another one, or to the top.
+#[derive(Clone)]
+enum Moving {
+    Images(Vec<String>),
+    Folders(Vec<String>),
+}
+
+impl Moving {
+    /// The move itself, to `target`: a folder, or `None` for unfiled or the top.
+    fn into_action(self, target: Option<String>) -> Action {
+        match self {
+            Moving::Images(ids) => Action::MoveTo(ids, target),
+            Moving::Folders(ids) => Action::MoveFolders(ids, target),
+        }
+    }
+}
+
 impl Dialog {
     fn move_to(ids: Vec<String>) -> Dialog {
-        Dialog::MoveTo { ids, search: String::new(), pick: 0 }
+        Dialog::MoveTo { what: Moving::Images(ids), search: String::new(), pick: 0 }
+    }
+
+    fn move_folders(ids: Vec<String>) -> Dialog {
+        Dialog::MoveTo { what: Moving::Folders(ids), search: String::new(), pick: 0 }
     }
 }
 
@@ -87,6 +108,15 @@ const RECENT_FOLDERS: usize = 5;
 
 /// What a drag from the grid carries: the images being dragged, to drop on a folder, a tag or the trash.
 struct Drag(Vec<String>);
+
+/// What a drag from the folder tree carries: the folders being dragged, to drop on another folder, or on the
+/// Folders heading for the top.
+struct FolderDrag(Vec<String>);
+
+/// Whether images or folders are being dragged.
+fn dragging(ctx: &egui::Context) -> bool {
+    egui::DragAndDrop::has_payload_of_type::<Drag>(ctx) || egui::DragAndDrop::has_payload_of_type::<FolderDrag>(ctx)
+}
 
 /// How long dragged images have to stay over a closed folder before it opens for them.
 const HOVER_OPEN: Duration = Duration::from_millis(500);
@@ -107,7 +137,9 @@ enum Action {
     Trash(Vec<String>),
     Restore(Vec<String>),
     MoveTo(Vec<String>, Option<String>),
-    /// Images are being dragged over this closed folder: open it once they have stayed a moment.
+    /// Put folders under another folder, or at the top (`None`), with everything in them.
+    MoveFolders(Vec<String>, Option<String>),
+    /// Images or folders are being dragged over this closed folder: open it once they have stayed a moment.
     DragOver(String),
     /// Ctrl-click on a folder: into the pick, or out of it again.
     PickFolder(String),
@@ -566,11 +598,33 @@ impl App {
                     Ok(())
                 })?;
                 self.refresh();
-                self.recent_folders.retain(|f| *f != folder);
-                self.recent_folders.insert(0, folder.clone());
-                self.recent_folders.truncate(RECENT_FOLDERS);
+                self.remember_target(folder.clone());
                 let place = folder.map(|f| self.model().catalog.folder_path(&f)).unwrap_or_else(|| "unfiled".into());
                 self.say(format!("moved {} image(s) to {place}", ids.len()), false);
+            }
+            Action::MoveFolders(ids, parent) => {
+                let catalog = &self.model().catalog;
+                // a folder inside another of them goes with it, and one already there has nowhere to go
+                let tops: Vec<String> = top_level(catalog, &ids)
+                    .into_iter()
+                    .filter(|id| catalog.folders.get(id).is_some_and(|f| f.parent != parent))
+                    .collect();
+                if tops.is_empty() {
+                    return Ok(());
+                }
+                let what = match tops.as_slice() {
+                    [id] => format!("folder {}", catalog.folder_path(id)),
+                    _ => format!("{} folders", tops.len()),
+                };
+                store::edit_catalog(&self.lib, "mv", &[], |c| {
+                    tops.iter().try_for_each(|id| c.set_parent(id, parent.clone()))
+                })?;
+                self.refresh();
+                if parent.is_some() {
+                    self.remember_target(parent.clone());
+                }
+                let place = parent.map(|p| self.model().catalog.folder_path(&p)).unwrap_or_else(|| "the top".into());
+                self.say(format!("moved {what} to {place}"), false);
             }
             Action::AddTag(ids, tag) => {
                 let tag = tag.trim().to_owned();
@@ -692,6 +746,13 @@ impl App {
         Ok(())
     }
 
+    /// Puts `folder` first among the folders moved to lately, which the Move to dialog lists first.
+    fn remember_target(&mut self, folder: Option<String>) {
+        self.recent_folders.retain(|f| *f != folder);
+        self.recent_folders.insert(0, folder);
+        self.recent_folders.truncate(RECENT_FOLDERS);
+    }
+
     fn copy(&mut self, ctx: Option<&egui::Context>, text: String, what: &str) {
         if let Some(ctx) = ctx {
             ctx.copy_text(text);
@@ -795,8 +856,8 @@ impl App {
             resp
         };
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            // images dragged near the top or the bottom scroll the list, to reach a folder out of sight
-            if egui::DragAndDrop::has_payload_of_type::<Drag>(ui.ctx())
+            // images or folders dragged near the top or the bottom scroll the list, to reach a folder out of sight
+            if dragging(ui.ctx())
                 && let Some(pos) = ui.ctx().pointer_latest_pos()
                 && ui.clip_rect().contains(pos)
             {
@@ -826,12 +887,18 @@ impl App {
                 row(ui, self.view.clone(), format!("{}  ({})", self.title(), model.made_from(id)), actions);
             }
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Folders").strong());
-                if ui.small_button("+").on_hover_text("New folder").clicked() {
-                    actions.push(Action::Dialog(Dialog::NewFolder { parent: None, name: String::new() }));
-                }
-            });
+            let heading = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("Folders").strong());
+                    if ui.small_button("+").on_hover_text("New folder").clicked() {
+                        actions.push(Action::Dialog(Dialog::NewFolder { parent: None, name: String::new() }));
+                    }
+                })
+                .response;
+            // folders dropped on the heading go to the top
+            if let Some(ids) = drop_folders_on(ui, &heading, |_| true) {
+                actions.push(Action::MoveFolders(ids, None));
+            }
             self.folder_rows(ui, None, counts, actions);
             let tags = &model.tags;
             if !tags.is_empty() {
@@ -930,6 +997,8 @@ impl App {
             let text = format!("{}  ({n})", folder.name);
             let picked = self.picked_folders.iter().any(|p| p == id);
             let selected = picked || self.view == View::Folder(id.to_owned());
+            // a drag, and the menu's move and deletion, take the whole pick when this folder is in it
+            let group = if picked { self.picked_folders.clone() } else { vec![id.to_owned()] };
             // a click shows the folder; with Ctrl it goes into the pick, or out of it
             let click = |ui: &egui::Ui, actions: &mut Vec<Action>| {
                 let ctrl = ui.input(|i| i.modifiers.command);
@@ -938,6 +1007,20 @@ impl App {
                 } else {
                     Action::View(View::Folder(id.to_owned()))
                 });
+            };
+            // dropped images go into the folder and dropped folders under it, unless one of those is this folder
+            // or above it; the row drags its group
+            let takes = |dragged: &[String]| !dragged.iter().any(|d| model.catalog.subtree(d).contains(id));
+            let dnd = |ui: &egui::Ui, resp: &egui::Response, actions: &mut Vec<Action>| {
+                if let Some(ids) = drop_on(ui, resp) {
+                    actions.push(Action::MoveTo(ids, Some(id.to_owned())));
+                }
+                if let Some(ids) = drop_folders_on(ui, resp, takes) {
+                    actions.push(Action::MoveFolders(ids, Some(id.to_owned())));
+                }
+                if resp.drag_started() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), FolderDrag(group.clone()));
+                }
             };
             let menu = |resp: &egui::Response, actions: &mut Vec<Action>| {
                 resp.context_menu(|ui| {
@@ -959,16 +1042,16 @@ impl App {
                         }));
                         ui.close();
                     }
-                    // on one of several picked folders, the deletion is of them all
-                    let ids = if picked && self.picked_folders.len() > 1 {
-                        self.picked_folders.clone()
-                    } else {
-                        vec![id.to_owned()]
-                    };
+                    let several = group.len() > 1;
                     let label =
-                        if ids.len() > 1 { format!("Delete {} folders…", ids.len()) } else { "Delete…".into() };
+                        if several { format!("Move {} folders to…", group.len()) } else { "Move to…".into() };
+                    if ui.button(label).on_hover_text("under another folder, or to the top (M)").clicked() {
+                        actions.push(Action::Dialog(Dialog::move_folders(group.clone())));
+                        ui.close();
+                    }
+                    let label = if several { format!("Delete {} folders…", group.len()) } else { "Delete…".into() };
                     if ui.button(label).clicked() {
-                        actions.push(Action::Dialog(Dialog::DeleteFolders { ids }));
+                        actions.push(Action::Dialog(Dialog::DeleteFolders { ids: group.clone() }));
                         ui.close();
                     }
                 });
@@ -976,13 +1059,11 @@ impl App {
             if model.catalog.children(Some(id)).is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(ui.spacing().indent);
-                    let resp = sidebar_row(ui, selected, text);
+                    let resp = sidebar_row(ui, selected, text).interact(Sense::drag());
                     if resp.clicked() {
                         click(ui, actions);
                     }
-                    if let Some(ids) = drop_on(ui, &resp) {
-                        actions.push(Action::MoveTo(ids, Some(id.to_owned())));
-                    }
+                    dnd(ui, &resp, actions);
                     menu(&resp, actions);
                 });
             } else {
@@ -995,14 +1076,14 @@ impl App {
                 let open = state.is_open();
                 state
                     .show_header(ui, |ui| {
-                        let resp = sidebar_row(ui, selected, text);
+                        let resp = sidebar_row(ui, selected, text).interact(Sense::drag());
                         if resp.clicked() {
                             click(ui, actions);
                         }
-                        if let Some(ids) = drop_on(ui, &resp) {
-                            actions.push(Action::MoveTo(ids, Some(id.to_owned())));
-                        }
-                        if !open && resp.dnd_hover_payload::<Drag>().is_some() {
+                        dnd(ui, &resp, actions);
+                        let over = resp.dnd_hover_payload::<Drag>().is_some()
+                            || resp.dnd_hover_payload::<FolderDrag>().is_some();
+                        if !open && over {
                             actions.push(Action::DragOver(id.to_owned()));
                         }
                         menu(&resp, actions);
@@ -1012,15 +1093,14 @@ impl App {
         }
     }
 
-    /// What follows the pointer while images are dragged: the first one's thumbnail and how many there are.
-    fn drag_ghost(&mut self, ctx: &egui::Context, ids: &[String], pos: egui::Pos2) {
+    /// What follows the pointer while a drag lasts: `text`, and for images the first one's thumbnail (`thumb`).
+    fn drag_ghost(&mut self, ctx: &egui::Context, thumb: Option<&str>, text: String, pos: egui::Pos2) {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-ghost")));
-        let count = if ids.len() == 1 { "1 image".to_owned() } else { format!("{} images", ids.len()) };
-        let text = painter.layout_no_wrap(count, FontId::proportional(13.0), Color32::WHITE);
-        let first = ids.first().and_then(|id| {
+        let text = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+        let first = thumb.and_then(|id| {
             let item = self.model.as_ref()?.items.get(id)?;
             let source = Source { file: item.file.clone(), fallback: item.fallback.clone() };
-            self.thumbs.get(&Key { id: id.clone(), size: thumbs::GRID }, || source)
+            self.thumbs.get(&Key { id: id.to_owned(), size: thumbs::GRID }, || source)
         });
         let (side, pad) = (48.0, 6.0);
         let width = pad + first.as_ref().map_or(0.0, |_| side + pad) + text.size().x + pad;
@@ -1685,12 +1765,26 @@ impl App {
                         run = Some(Box::new(move |app| app.delete_folders(&tops)));
                     }
                 }
-                Dialog::MoveTo { ids, search, pick } => {
-                    ui.heading(format!("Move {} image(s) to", ids.len()));
+                Dialog::MoveTo { what, search, pick } => {
+                    // a folder cannot go into itself, so moving folders, they and what is inside them are not offered
+                    let (heading, top, noun, barred): (String, &str, &str, Vec<String>) = match what {
+                        Moving::Images(ids) => (format!("Move {} image(s) to", ids.len()), "unfiled", "image(s)", vec![]),
+                        Moving::Folders(ids) => {
+                            let heading = match ids.as_slice() {
+                                [id] => format!("Move folder {} to", model.catalog.folder_path(id)),
+                                ids => format!("Move {} folders to", ids.len()),
+                            };
+                            let barred = ids.iter().flat_map(|id| model.catalog.subtree(id)).collect();
+                            (heading, "top", "folder(s)", barred)
+                        }
+                    };
+                    ui.heading(heading);
                     let typed = ui
                         .add(egui::TextEdit::singleline(search).hint_text("part of a folder's path").desired_width(f32::INFINITY));
                     typed.request_focus();
-                    let (choices, recent) = folder_choices(&model.paths, &self.recent_folders, search);
+                    let paths: Vec<(String, String)> =
+                        model.paths.iter().filter(|(_, id)| !barred.contains(id)).cloned().collect();
+                    let (choices, recent) = folder_choices(&paths, &self.recent_folders, search, top);
                     if typed.changed() {
                         *pick = 0;
                     }
@@ -1716,9 +1810,22 @@ impl App {
                         }
                     });
                     let path = search.trim().to_owned();
+                    // a new path would be made inside the deepest folder it names that exists: not inside a folder
+                    // being moved, which would then go into itself
+                    let into_itself = {
+                        let (mut deepest, mut prefix) = (None, String::new());
+                        for name in rope_core::catalog::split(&path) {
+                            prefix = if prefix.is_empty() { name.to_owned() } else { format!("{prefix}/{name}") };
+                            match model.catalog.find(&prefix) {
+                                Some(Some(id)) => deepest = Some(id),
+                                _ => break,
+                            }
+                        }
+                        deepest.is_some_and(|id| barred.contains(&id))
+                    };
                     let mut make: Option<String> = None;
-                    if !path.is_empty() && model.catalog.find(&path).is_none() {
-                        let hint = "makes the folder, and the ones on the way to it, then moves the image(s) there";
+                    if !path.is_empty() && model.catalog.find(&path).is_none() && !into_itself {
+                        let hint = format!("makes the folder, and the ones on the way to it, then moves the {noun} there");
                         if ui.button(format!("Create {path} and move there")).on_hover_text(hint).clicked()
                             || (enter && choices.is_empty())
                         {
@@ -1728,14 +1835,14 @@ impl App {
                     if buttons(ui, "Move", enter && !choices.is_empty(), &mut done) && !choices.is_empty() {
                         chosen = Some(choices[*pick].1.clone());
                     }
-                    let ids = ids.clone();
+                    let what = what.clone();
                     if let Some(target) = chosen {
-                        run = Some(Box::new(move |app| app.try_apply(Action::MoveTo(ids, target), None)));
+                        run = Some(Box::new(move |app| app.try_apply(what.into_action(target), None)));
                     } else if let Some(path) = make {
                         run = Some(Box::new(move |app| {
                             app.new_folder(&path)?;
                             let target = app.model().catalog.find(&path).flatten();
-                            app.try_apply(Action::MoveTo(ids, target), None)
+                            app.try_apply(what.into_action(target), None)
                         }));
                     }
                 }
@@ -1900,8 +2007,12 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::L)) && !self.selected.is_empty() {
             actions.push(Action::ToggleFavorite(self.selected.clone()));
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::M)) && !self.selected.is_empty() {
-            actions.push(Action::Dialog(Dialog::move_to(self.selected.clone())));
+        if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+            if !self.picked_folders.is_empty() {
+                actions.push(Action::Dialog(Dialog::move_folders(self.picked_folders.clone())));
+            } else if !self.selected.is_empty() {
+                actions.push(Action::Dialog(Dialog::move_to(self.selected.clone())));
+            }
         }
         let look = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
         if look && let Some(id) = self.selected.last() {
@@ -2058,10 +2169,19 @@ impl App {
             .default_width(380.0)
             .show(ctx, |ui| self.details(ui, &mut actions));
         egui::CentralPanel::default().show(ctx, |ui| self.grid(ui, &mut actions));
-        if let Some(drag) = egui::DragAndDrop::payload::<Drag>(ctx)
-            && let Some(pos) = ctx.pointer_latest_pos()
+        if let Some(pos) = ctx.pointer_latest_pos()
+            && let Some(drag) = egui::DragAndDrop::payload::<Drag>(ctx)
         {
-            self.drag_ghost(ctx, &drag.0, pos);
+            let count = if drag.0.len() == 1 { "1 image".to_owned() } else { format!("{} images", drag.0.len()) };
+            self.drag_ghost(ctx, drag.0.first().map(String::as_str), count, pos);
+        } else if let Some(pos) = ctx.pointer_latest_pos()
+            && let Some(drag) = egui::DragAndDrop::payload::<FolderDrag>(ctx)
+        {
+            let text = match drag.0.as_slice() {
+                [id] => format!("folder {}", self.model().catalog.folders.get(id).map_or("", |f| f.name.as_str())),
+                ids => format!("{} folders", ids.len()),
+            };
+            self.drag_ghost(ctx, None, text, pos);
         } else {
             self.drag_over = None;
         }
@@ -2096,6 +2216,17 @@ fn drop_on(ui: &egui::Ui, resp: &egui::Response) -> Option<Vec<String>> {
         ui.painter().rect_stroke(resp.rect, 4.0, stroke, egui::StrokeKind::Inside);
     }
     resp.dnd_release_payload::<Drag>().map(|d| d.0.clone())
+}
+
+/// The same for dragged folders, when `takes` says this target can take them: a folder cannot go into itself.
+fn drop_folders_on(ui: &egui::Ui, resp: &egui::Response, takes: impl Fn(&[String]) -> bool) -> Option<Vec<String>> {
+    let over = resp.dnd_hover_payload::<FolderDrag>()?;
+    if !takes(&over.0) {
+        return None;
+    }
+    let stroke = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
+    ui.painter().rect_stroke(resp.rect, 4.0, stroke, egui::StrokeKind::Inside);
+    resp.dnd_release_payload::<FolderDrag>().map(|d| d.0.clone())
 }
 
 fn sidebar_row(ui: &mut egui::Ui, selected: bool, text: String) -> egui::Response {
@@ -2158,29 +2289,31 @@ fn star_button(ui: &mut egui::Ui, favorite: bool) -> egui::Response {
 }
 
 /// OK and Cancel; returns whether OK was pressed (or `enter_ok`). Cancel sets `done`.
-/// What the Move to dialog lists for `search`, as (text, target), the target None for unfiled, and how many of
-/// the entries are the recent targets, which come first. With nothing typed: `recent` (those that still exist),
-/// then unfiled and every folder by path, each once. With text: the folders whose path has it, case-insensitively,
-/// those whose own name starts with it first, then those with a part on the way starting with it, then the rest,
-/// each group by path; unfiled when "/ (unfiled)" has it.
+/// What the Move to dialog lists for `search`, as (text, target), the target None for the top, shown as
+/// "/ (unfiled)" for images and "/ (top)" for folders (`top` is that word), and how many of the entries are the
+/// recent targets, which come first. With nothing typed: `recent` (those that still exist), then the top and every
+/// folder by path, each once. With text: the folders whose path has it, case-insensitively, those whose own name
+/// starts with it first, then those with a part on the way starting with it, then the rest, each group by path;
+/// the top when its text has it.
 fn folder_choices(
     paths: &[(String, String)],
     recent: &[Option<String>],
     search: &str,
+    top: &str,
 ) -> (Vec<(String, Option<String>)>, usize) {
-    const UNFILED: &str = "/ (unfiled)";
+    let none = format!("/ ({top})");
     let needle = search.trim().to_lowercase();
     if needle.is_empty() {
         let mut out: Vec<(String, Option<String>)> = recent
             .iter()
             .filter_map(|r| match r {
-                None => Some((UNFILED.to_owned(), None)),
+                None => Some((none.clone(), None)),
                 Some(id) => paths.iter().find(|(_, fid)| fid == id).map(|(p, fid)| (p.clone(), Some(fid.clone()))),
             })
             .collect();
         let n = out.len();
         if !recent.contains(&None) {
-            out.push((UNFILED.to_owned(), None));
+            out.push((none.clone(), None));
         }
         let fresh = |fid: &String| !recent.iter().any(|r| r.as_deref() == Some(fid.as_str()));
         out.extend(paths.iter().filter(|(_, fid)| fresh(fid)).map(|(p, fid)| (p.clone(), Some(fid.clone()))));
@@ -2202,8 +2335,8 @@ fn folder_choices(
     };
     let mut ranked: Vec<(u8, String, Option<String>)> =
         paths.iter().filter_map(|(p, fid)| rank(p).map(|r| (r, p.clone(), Some(fid.clone())))).collect();
-    if UNFILED.contains(&needle) {
-        ranked.push((if "unfiled".starts_with(&needle) { 1 } else { 2 }, UNFILED.to_owned(), None));
+    if none.contains(&needle) {
+        ranked.push((if top.starts_with(&needle) { 1 } else { 2 }, none, None));
     }
     ranked.sort_by_key(|r| r.0); // stable: each group keeps the order of `paths`, which is by path
     (ranked.into_iter().map(|(_, p, t)| (p, t)).collect(), 0)
@@ -2273,17 +2406,25 @@ mod tests {
         let recent = vec![Some("4".to_owned()), None, Some("gone".to_owned())];
         let text = |c: &(Vec<(String, Option<String>)>, usize)| c.0.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
 
-        let all = folder_choices(&paths, &recent, "");
+        let all = folder_choices(&paths, &recent, "", "unfiled");
         assert_eq!(text(&all), ["trips/京都", "/ (unfiled)", "a", "a/b", "trips"]);
         assert_eq!(all.1, 2, "two recent targets, the deleted folder dropped");
         assert_eq!(all.0[1].1, None);
-        assert_eq!(text(&folder_choices(&paths, &[], "")), ["/ (unfiled)", "a", "a/b", "trips", "trips/京都"]);
+        assert_eq!(
+            text(&folder_choices(&paths, &[], "", "unfiled")),
+            ["/ (unfiled)", "a", "a/b", "trips", "trips/京都"]
+        );
 
-        assert_eq!(text(&folder_choices(&paths, &recent, "b")), ["a/b"]);
-        assert_eq!(text(&folder_choices(&paths, &recent, "TRI")), ["trips", "trips/京都"], "own name first");
-        assert_eq!(text(&folder_choices(&paths, &recent, "京")), ["trips/京都"]);
-        assert_eq!(text(&folder_choices(&paths, &recent, "unf")), ["/ (unfiled)"]);
-        assert!(folder_choices(&paths, &recent, "zzz").0.is_empty());
+        assert_eq!(text(&folder_choices(&paths, &recent, "b", "unfiled")), ["a/b"]);
+        assert_eq!(text(&folder_choices(&paths, &recent, "TRI", "unfiled")), ["trips", "trips/京都"], "own name first");
+        assert_eq!(text(&folder_choices(&paths, &recent, "京", "unfiled")), ["trips/京都"]);
+        assert_eq!(text(&folder_choices(&paths, &recent, "unf", "unfiled")), ["/ (unfiled)"]);
+        assert!(folder_choices(&paths, &recent, "zzz", "unfiled").0.is_empty());
+
+        // moving folders, the None target is the top
+        assert_eq!(text(&folder_choices(&paths, &[], "", "top")), ["/ (top)", "a", "a/b", "trips", "trips/京都"]);
+        assert_eq!(text(&folder_choices(&paths, &[], "to", "top")), ["/ (top)"]);
+        assert!(folder_choices(&paths, &[], "unf", "top").0.is_empty());
     }
 
     /// A clip's thumbnail is its poster frame, which ffmpeg made when it came in.
@@ -2507,6 +2648,118 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| app.frame(ctx));
+    }
+
+    #[test]
+    fn folders_move_under_another_or_to_the_top_but_never_into_themselves() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some());
+        for path in ["trips/京都", "trips/東京", "work", "archive"] {
+            app.new_folder(path).unwrap();
+        }
+        let fid = |app: &App, path: &str| app.model().catalog.find(path).unwrap().unwrap();
+        let (trips, kyoto, work, archive) =
+            (fid(&app, "trips"), fid(&app, "trips/京都"), fid(&app, "work"), fid(&app, "archive"));
+        let photo = store::add(
+            &lib,
+            &png(dir.path(), "photo.png", 1),
+            &NewImage { via: "import".into(), folder: Some(Some(kyoto.clone())), ..Default::default() },
+        )
+        .unwrap()
+        .sha;
+        app.refresh();
+        let status = |app: &App| app.status.as_ref().map(|s| (s.0.clone(), s.1)).unwrap_or_default();
+
+        // a drop: trips goes under archive with everything in it; the image stays in 京都, now archive/trips/京都,
+        // and so does the view, which holds the folder by id
+        app.apply(Action::View(View::Folder(kyoto.clone())), Some(&ctx));
+        app.apply(Action::MoveFolders(vec![trips.clone()], Some(archive.clone())), Some(&ctx));
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert_eq!(c.folder_path(&kyoto), "archive/trips/京都");
+        assert_eq!(c.entry(&photo).folder.as_deref(), Some(kyoto.as_str()));
+        assert_eq!(app.view, View::Folder(kyoto.clone()));
+        assert_eq!(app.title(), "archive/trips/京都");
+        assert_eq!(status(&app), ("moved folder trips to archive".to_owned(), false));
+        assert_eq!(app.recent_folders[0], Some(archive.clone()), "a target for the dialog to list first");
+
+        // the pick moves together, one inside another going with it; a folder already there is left alone, and
+        // the top is a target too
+        for id in [&kyoto, &trips, &work] {
+            app.apply(Action::PickFolder(id.clone()), Some(&ctx));
+        }
+        app.apply(Action::MoveFolders(app.picked_folders.clone(), Some(archive.clone())), Some(&ctx));
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert_eq!((c.folder_path(&kyoto), c.folder_path(&work)), ("archive/trips/京都".into(), "archive/work".into()));
+        assert_eq!(status(&app), ("moved folder work to archive".to_owned(), false), "trips was there already");
+        app.apply(Action::MoveFolders(vec![trips.clone(), work.clone()], None), Some(&ctx));
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert_eq!((c.folder_path(&kyoto), c.folder_path(&work)), ("trips/京都".into(), "work".into()));
+        assert_eq!(status(&app), ("moved 2 folders to the top".to_owned(), false));
+        assert_eq!(app.recent_folders[0], Some(archive.clone()), "the top is not remembered");
+        app.status = None;
+        app.apply(Action::MoveFolders(vec![archive.clone()], None), Some(&ctx));
+        assert!(app.status.is_none(), "nothing to do, nothing said");
+
+        // into itself, or where a folder of its name is: refused, the catalog as it was
+        app.apply(Action::MoveFolders(vec![trips.clone()], Some(kyoto.clone())), Some(&ctx));
+        assert!(status(&app).1 && status(&app).0.contains("into itself"), "{:?}", app.status);
+        app.new_folder("archive/work").unwrap();
+        app.apply(Action::MoveFolders(vec![work.clone()], Some(archive.clone())), Some(&ctx));
+        assert!(status(&app).1 && status(&app).0.contains("\"archive/work\" exists"), "{:?}", app.status);
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().folder_path(&work), "work");
+
+        // the dialog: part of a path and Enter puts the folder there; a path no folder has is made on the way
+        app.dialog =
+            Some(Dialog::MoveTo { what: Moving::Folders(vec![work.clone()]), search: "東京".into(), pick: 0 });
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().folder_path(&work), "trips/東京/work");
+        assert!(app.dialog.is_none());
+        app.dialog =
+            Some(Dialog::MoveTo { what: Moving::Folders(vec![trips.clone()]), search: "2026/spring".into(), pick: 0 });
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().folder_path(&trips), "2026/spring/trips");
+        // the folder itself and the folders inside it are not offered, and no new folder is made inside it either
+        for search in ["2026/spring/trips/京都", "2026/spring/trips/new"] {
+            app.dialog =
+                Some(Dialog::MoveTo { what: Moving::Folders(vec![trips.clone()]), search: search.into(), pick: 0 });
+            press(&ctx, &mut app, egui::Key::Enter);
+            assert!(app.dialog.is_some(), "{search}: nothing to move to");
+        }
+        let c = rope_core::Catalog::load(&lib).unwrap();
+        assert_eq!(c.folder_path(&trips), "2026/spring/trips");
+        assert!(c.find("2026/spring/trips/new").is_none());
+        app.dialog = None;
+
+        // dragging: the ghost names the folder while it is held; let go over nothing, it stays where it is
+        egui::DragAndDrop::set_payload(&ctx, FolderDrag(vec![trips.clone()]));
+        let middle = egui::pos2(700.0, 450.0);
+        pointer(&ctx, &mut app, vec![egui::Event::PointerMoved(middle)]);
+        assert!(egui::DragAndDrop::has_payload_of_type::<FolderDrag>(&ctx), "held while the button is down");
+        pointer(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: middle,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(!egui::DragAndDrop::has_payload_of_type::<FolderDrag>(&ctx));
+        assert_eq!(rope_core::Catalog::load(&lib).unwrap().folder_path(&trips), "2026/spring/trips");
+
+        // M with folders picked asks where to move the pick (the earlier pick is let go first)
+        app.apply(Action::View(View::All), Some(&ctx));
+        assert!(app.picked_folders.is_empty());
+        app.apply(Action::PickFolder(work.clone()), Some(&ctx));
+        press(&ctx, &mut app, egui::Key::M);
+        assert!(
+            matches!(&app.dialog, Some(Dialog::MoveTo { what: Moving::Folders(ids), .. }) if *ids == vec![work.clone()]),
+            "M opens the dialog for the pick"
+        );
     }
 
     #[test]
@@ -2822,7 +3075,8 @@ mod tests {
             Dialog::DeleteFolders { ids: vec![folder.clone()] },
             Dialog::Tag { ids: vec![result.clone()], name: String::new() },
             Dialog::Purge { ids: vec![photo.clone()] },
-            Dialog::MoveTo { ids: vec![result.clone()], search: String::new(), pick: 0 },
+            Dialog::move_to(vec![result.clone()]),
+            Dialog::move_folders(vec![folder.clone()]),
         ] {
             app.dialog = Some(d);
             frames_until(&ctx, &mut app, |_| true);
@@ -2871,13 +3125,15 @@ mod tests {
 
         // Move to…: part of a folder's path and Enter moves there; a path no folder has is made on the way; the
         // targets are remembered, the latest first
-        app.dialog = Some(Dialog::MoveTo { ids: vec![photo.clone()], search: "day 1".into(), pick: 0 });
+        app.dialog =
+            Some(Dialog::MoveTo { what: Moving::Images(vec![photo.clone()]), search: "day 1".into(), pick: 0 });
         press(&ctx, &mut app, egui::Key::Enter);
         let c = rope_core::Catalog::load(&lib).unwrap();
         let day1 = c.find("trips/京都/day 1").unwrap().unwrap();
         assert_eq!(c.entry(&photo).folder, Some(day1.clone()));
         assert!(app.dialog.is_none());
-        app.dialog = Some(Dialog::MoveTo { ids: vec![photo.clone()], search: "trips/東京".into(), pick: 0 });
+        app.dialog =
+            Some(Dialog::MoveTo { what: Moving::Images(vec![photo.clone()]), search: "trips/東京".into(), pick: 0 });
         press(&ctx, &mut app, egui::Key::Enter);
         let c = rope_core::Catalog::load(&lib).unwrap();
         let tokyo = c.find("trips/東京").unwrap().expect("made by the dialog");

@@ -134,8 +134,9 @@ The window runs on its own: the command returns at once, and closing the termina
 **Left:**
 
 - Prompts, the page of prompts kept to use again (below); then All, Unfiled, and rope's own folder tree, with image counts.
-- Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it, or delete it with everything in it (its images move to the trash; it says how many first); `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
-- Ctrl-click folders to pick several; the pick shows as selected. Right-click one of them and choose Delete N folders…, or press Delete, to delete them all with everything in them; it says how many folders and images first. A plain click on the left, a click on an image, or Esc lets the pick go.
+- Right-click a folder to copy its path (as commands take it: `trips/京都`, or `'trips/day 1'` when it has a space), make a subfolder, rename it, move it under another folder (Move to…, the dialog below, with M), or delete it with everything in it (its images move to the trash; it says how many first); `+` makes a top-level folder. A new folder's name can be a path: `a/b` makes `b` inside `a`, and `a` too if it is missing.
+- Drag a folder onto another folder to move it there, with its subfolders and images; onto the Folders heading, to put it at the top. A folder cannot go into itself, so neither it nor the folders inside it take the drop, and a folder of the same name where it would land refuses it. Images keep their folder: only its path changes, and so the view stays on it.
+- Ctrl-click folders to pick several; the pick shows as selected. Right-click one of them and choose Delete N folders…, or press Delete, to delete them all with everything in them; it says how many folders and images first. Move N folders to…, M, or a drag of one of them moves the pick together. A plain click on the left, a click on an image, or Esc lets the pick go.
 - Below the tree: the tags, then the trash. Right-click the trash and choose Clean to empty it; it asks first, since that deletes for good.
 
 **Middle:**
@@ -146,7 +147,7 @@ The window runs on its own: the command returns at once, and closing the termina
 - Click to select, Ctrl-click to add, Shift-click for a range. Double-click, Enter or Space opens the large view (below).
 - Right-click to copy the path or the repro command, view large, crop (below), open in the default image viewer, move to a folder, add a tag, add to or remove from the favorites, or trash.
 - Drag a thumbnail onto a folder on the left to move it there; the selection drags together, with a ghost of the first image and the count at the pointer. Unfiled takes drops too, and so do a tag, which adds it, and the trash. A closed folder opens after half a second under the pointer, the list scrolls when the pointer is near its top or bottom, and Esc lets go.
-- **Move to…** (in that menu, on M, and as the Folder button on the right) opens a dialog over the folders: type part of a path and the list narrows to the folders that have it, the ones whose own name starts with it first; ↑ ↓ pick, Enter moves, or click one. With nothing typed, the folders moved to lately come first. A path no folder has yet is made on Enter, with the folders on the way to it.
+- **Move to…** (in that menu, on M, and as the Folder button on the right) opens a dialog over the folders: type part of a path and the list narrows to the folders that have it, the ones whose own name starts with it first; ↑ ↓ pick, Enter moves, or click one. With nothing typed, the folders moved to lately come first. A path no folder has yet is made on Enter, with the folders on the way to it. The same dialog moves folders, from a folder's right-click menu or M with folders picked: `/ (top)` puts them at the top, and the folders being moved and those inside them are left out of the list.
 
 **Right**, the selected image:
 
@@ -167,7 +168,7 @@ The window runs on its own: the command returns at once, and closing the termina
 | Arrow keys | Move the selection |
 | Enter, Space | View the selected image large |
 | L | Mark the selection as favorites, or unmark it when all of it is |
-| M | Move the selection to a folder: the Move to… dialog |
+| M | Move the selection to a folder: the Move to… dialog; with folders picked, move those |
 | Ctrl+A | Select all |
 | Delete, Backspace | Move to the trash (in the trash: delete for good); with folders picked, delete those |
 | Ctrl+C | Copy the path |
