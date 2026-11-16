@@ -277,7 +277,7 @@ impl App {
             lib,
             model: None,
             loading: Some(loading),
-            view: View::All,
+            view: View::Nothing,
             search: String::new(),
             visible: Vec::new(),
             visible_for: None,
@@ -1125,11 +1125,16 @@ impl App {
         }
         let n = self.visible.len();
         if n == 0 {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    RichText::new(if self.search.is_empty() { "No images here" } else { "Nothing matches" }).weak(),
-                );
-            });
+            let text = if !self.search.trim().is_empty() {
+                "Nothing matches"
+            } else if self.view == View::Nothing {
+                // the window opens here, on no images at all: the whole library's thumbnails are not what a look at
+                // one folder, or at the queue, should cost
+                "Choose a folder or a tag on the left, or search"
+            } else {
+                "No images here"
+            };
+            ui.centered_and_justified(|ui| ui.label(RichText::new(text).weak()));
             return;
         }
         let gap = ui.spacing().item_spacing;
@@ -2044,6 +2049,8 @@ impl App {
     fn title(&self) -> String {
         let model = self.model();
         match &self.view {
+            View::Nothing if self.search.trim().is_empty() => "Nothing open".into(),
+            View::Nothing => "Search".into(),
             View::All => "All images".into(),
             View::Unfiled => "Unfiled".into(),
             View::Folder(f) => model.catalog.folder_path(f),
@@ -2140,6 +2147,7 @@ impl App {
                 ui.separator();
                 ui.label(RichText::new(self.title()).strong());
                 let count = match self.view {
+                    View::Nothing if self.search.trim().is_empty() => String::new(),
                     View::Prompts => format!("{} prompt(s)", self.prompts_shown().len()),
                     View::Queue => format!("{} job(s)", self.model().jobs.len()),
                     _ => format!("{} image(s)", self.visible.len()),
@@ -2446,6 +2454,7 @@ mod tests {
         let id = store::add(&lib, &clip, &NewImage { via: "import".into(), ..Default::default() }).unwrap().sha;
         let ctx = egui::Context::default();
         let mut app = App::new(&ctx, lib.clone(), None);
+        app.apply(Action::View(View::All), Some(&ctx));
         frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: id.clone(), size: thumbs::GRID }));
         let item = &app.model().items[&id];
         assert!(item.fallback.as_ref().is_some_and(|p| p.ends_with("poster.png")), "{:?}", item.fallback);
@@ -2788,6 +2797,35 @@ mod tests {
         assert!((width(&ctx) - 150.0).abs() < 2.0, "the sidebar is {} wide", width(&ctx));
     }
 
+    /// The window opens on no view: no images, so no thumbnails to decode, until a view is chosen or a search typed.
+    #[test]
+    fn the_window_opens_on_no_images_until_a_view_is_chosen_or_a_search_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let new = || NewImage { via: "import".into(), ..Default::default() };
+        let sea = store::add(&lib, &png(dir.path(), "sea.png", 1), &new()).unwrap().sha;
+        let hill = store::add(&lib, &png(dir.path(), "hill.png", 2), &new()).unwrap().sha;
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib.clone(), None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some());
+        frames_until(&ctx, &mut app, |_| true);
+        assert_eq!(app.view, View::Nothing);
+        assert!(app.visible.is_empty(), "no view is open: {:?}", app.visible);
+        assert_eq!(app.title(), "Nothing open");
+
+        // a search looks through every image, as it would in All
+        app.search = "sea".into();
+        frames_until(&ctx, &mut app, |a| a.visible == [sea.clone()]);
+        assert_eq!(app.title(), "Search");
+        app.search.clear();
+        frames_until(&ctx, &mut app, |a| a.visible.is_empty());
+
+        // All is one click away, as any other view is
+        app.apply(Action::View(View::All), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.visible.len() == 2);
+        assert!(app.visible.contains(&hill));
+    }
+
     #[test]
     fn the_large_view_steps_zooms_trashes_and_goes_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -2799,6 +2837,7 @@ mod tests {
         let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
         let ctx = egui::Context::default();
         let mut app = App::new(&ctx, lib.clone(), None);
+        app.apply(Action::View(View::All), Some(&ctx));
         frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 3);
         let order = app.visible.clone();
 
@@ -2877,6 +2916,7 @@ mod tests {
         let original = store::add(&lib, &path, &new).unwrap().sha;
         let ctx = egui::Context::default();
         let mut app = App::new(&ctx, lib.clone(), None);
+        app.apply(Action::View(View::All), Some(&ctx));
         frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 1);
         app.apply(Action::Look(original.clone()), Some(&ctx));
         frames_until(&ctx, &mut app, |a| a.thumbs.ready(&Key { id: original.clone(), size: thumbs::VIEW }));
@@ -2946,6 +2986,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let mut app = App::new(&ctx, lib.clone(), None);
+        app.apply(Action::View(View::All), Some(&ctx));
         frames_until(&ctx, &mut app, |a| a.model.is_some() && a.visible.len() == 3);
         let order = app.visible.clone();
 

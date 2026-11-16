@@ -13,6 +13,9 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
+    /// Nothing chosen, as when the window opens: no images, so no thumbnails to decode, until a search, which looks
+    /// through all of them.
+    Nothing,
     All,
     Unfiled,
     Folder(String),
@@ -195,6 +198,7 @@ impl Model {
             .filter(|i| {
                 let e = self.catalog.items.get(&i.id);
                 let in_view = match view {
+                    View::Nothing => !search.is_empty() && self.shown(i),
                     View::All => self.shown(i),
                     View::Unfiled => self.shown(i) && e.is_none_or(|e| e.folder.is_none()),
                     View::Folder(id) => self.shown(i) && e.is_some_and(|e| e.folder.as_ref() == Some(id)),
