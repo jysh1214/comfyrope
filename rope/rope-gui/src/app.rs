@@ -2528,13 +2528,13 @@ mod tests {
         frames_until(&ctx, &mut app, |a| a.queue.log.as_ref().is_some_and(|(j, _, _)| *j == second));
         app.apply(Action::Queue(Act::Select(Some(Sel::Group(jobs[0].group.id)))), Some(&ctx));
         frames_until(&ctx, &mut app, |a| matches!(a.queue.selected, Some(Sel::Group(_))));
-        // both jobs are finished, so the group starts folded; Right opens it, Left folds it, and that sticks
+        // a group starts folded; Right opens it, Left folds it, and that sticks
         let g = jobs[0].group.id;
-        assert!(app.queue.collapsed(g, true));
+        assert!(app.queue.collapsed(g));
         press(&ctx, &mut app, egui::Key::ArrowRight);
-        assert!(!app.queue.collapsed(g, true));
+        assert!(!app.queue.collapsed(g));
         press(&ctx, &mut app, egui::Key::ArrowLeft);
-        assert!(app.queue.collapsed(g, true));
+        assert!(app.queue.collapsed(g));
         frames_until(&ctx, &mut app, |_| true);
         press(&ctx, &mut app, egui::Key::Escape);
         assert_eq!(app.queue.selected, None);

@@ -81,16 +81,16 @@ pub(super) struct Live {
     pub running: Option<Running>,
     pub selected: Option<Sel>,
     pub show_log: bool,
-    /// The groups folded or opened by hand; the rest follow the default, which folds a finished group.
+    /// The groups opened or folded by hand; the rest are folded.
     pub folded: BTreeMap<u64, bool>,
     /// The selected job's log as last read: job, text, when.
     pub log: Option<(u64, String, Instant)>,
 }
 
 impl Live {
-    /// Whether a group shows only its header: as the user last set it, else when the group is finished.
-    pub fn collapsed(&self, group: u64, finished: bool) -> bool {
-        self.folded.get(&group).copied().unwrap_or(finished)
+    /// Whether a group shows only its header: as the user last set it, else folded.
+    pub fn collapsed(&self, group: u64) -> bool {
+        self.folded.get(&group).copied().unwrap_or(true)
     }
 
     /// Starts following the daemon for the library at `root` on a thread of its own; it reconnects whenever the
@@ -348,8 +348,8 @@ impl App {
     }
 
     /// The middle: the status line, then every group in the order the daemon takes them, oldest first, and its jobs
-    /// in order, so the page reads top to bottom as the queue runs. A group folds to its header line; a finished one
-    /// starts folded, so that a long batch's done groups take one line each.
+    /// in order, so the page reads top to bottom as the queue runs. A group folds to its header line, and starts
+    /// folded, so that a long batch takes one line a group.
     pub(super) fn queue_page(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         self.queue_status(ui, actions);
         ui.separator();
@@ -368,8 +368,7 @@ impl App {
                 ui.label(RichText::new("No jobs. img2img.py and img2vid.py put theirs here.").weak());
             }
             for (gid, jobs) in &groups {
-                let finished = jobs.iter().all(|j| j.is_terminal());
-                let collapsed = self.queue.collapsed(*gid, finished);
+                let collapsed = self.queue.collapsed(*gid);
                 self.group_header(ui, *gid, jobs, collapsed, actions);
                 if !collapsed {
                     for job in jobs {
