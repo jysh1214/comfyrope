@@ -383,6 +383,7 @@ impl App {
 
     fn queue_status(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let waiting = self.model().jobs.iter().filter(|j| !j.is_terminal()).count();
+        let mut why = None;
         ui.horizontal(|ui| {
             if let Some(other) = &self.queue.other {
                 ui.label(RichText::new("rope-queue is running for another library").strong());
@@ -408,11 +409,13 @@ impl App {
                 if self.queue.stopping {
                     ui.label(RichText::new("· stopping").color(ui.visuals().warn_fg_color));
                 } else if self.queue.paused {
-                    let reason = self.queue.reason.clone().unwrap_or_default();
-                    ui.label(RichText::new(format!("· paused: {reason}")).color(ui.visuals().warn_fg_color));
-                    if ui.small_button("Resume").clicked() {
+                    // the reason goes under this line: it may be a sentence with a path in it, or the end of
+                    // ComfyUI's log, and beside the controls it would push them out of the window
+                    ui.label(RichText::new("· paused").color(ui.visuals().warn_fg_color));
+                    if ui.small_button("Resume").on_hover_text("go on with the next job").clicked() {
                         actions.push(Action::Queue(Act::Resume));
                     }
+                    why = self.queue.reason.clone();
                 } else if ui.small_button("Pause").on_hover_text("the running job finishes; the next waits").clicked() {
                     actions.push(Action::Queue(Act::Pause));
                 }
@@ -437,6 +440,9 @@ impl App {
                 }
             });
         });
+        if let Some(why) = why {
+            ui.add(egui::Label::new(RichText::new(why).color(ui.visuals().warn_fg_color)).wrap());
+        }
     }
 
     fn group_header(&mut self, ui: &mut egui::Ui, gid: u64, jobs: &[&Job], collapsed: bool, actions: &mut Vec<Action>) {

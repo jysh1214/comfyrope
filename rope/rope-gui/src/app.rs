@@ -2574,6 +2574,66 @@ mod tests {
         assert_eq!(app.model().jobs[0].id, more[0].id);
     }
 
+    /// A paused queue keeps Resume and Cancel all in the window however long the reason is: the reason wraps on a
+    /// line of its own under them.
+    #[test]
+    fn a_paused_queue_keeps_resume_in_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::init(&dir.path().join("lib")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, lib, None);
+        frames_until(&ctx, &mut app, |a| a.model.is_some());
+        app.apply(Action::View(View::Queue), Some(&ctx));
+        frames_until(&ctx, &mut app, |a| a.view == View::Queue);
+
+        // what the daemon says when an import finds the disk full
+        let reason = "#69043: rope could not take the result: cannot write \
+                      /home/someone/.local/share/rope/tmp/5272.64336/image.tmp: No space left on device (os error 28). \
+                      Its files are kept in out/; `rope-queue retry 69043` imports them again";
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 900.0));
+        // no daemon serves this library, and the thread that follows the socket says so every two seconds, which
+        // takes the status line away: the daemon's state is put back before each frame until one draws it. Nothing
+        // is clicked, so a daemon that does run for the user's own library hears nothing from here
+        let mut drawn = Vec::new();
+        for _ in 0..20 {
+            app.queue.connected = true;
+            app.queue.other = None;
+            app.queue.paused = true;
+            app.queue.reason = Some(reason.to_owned());
+            let out = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| app.frame(ctx));
+            drawn = texts(&out);
+            if drawn.iter().any(|(text, ..)| text == "Resume") {
+                break;
+            }
+        }
+        let shown = |what: &str| {
+            let (_, at, clip) = drawn.iter().find(|(text, ..)| text.contains(what)).unwrap_or_else(|| {
+                panic!("{what:?} is not drawn: {:?}", drawn.iter().map(|d| &d.0).collect::<Vec<_>>())
+            });
+            assert!(clip.intersect(screen).contains_rect(*at), "{what:?} is at {at:?}, outside {clip:?}");
+            *at
+        };
+        let (resume, cancel, why) = (shown("Resume"), shown("Cancel all"), shown("No space left on device"));
+        assert!(why.min.y >= resume.max.y && why.min.y >= cancel.max.y, "the reason is under the controls: {why:?}");
+        assert!(why.height() > 2.0 * resume.height(), "the reason wraps: {why:?}");
+    }
+
+    /// The text a frame drew: each piece, where it is, and the rectangle it is clipped to.
+    fn texts(out: &egui::FullOutput) -> Vec<(String, Rect, Rect)> {
+        fn walk(shape: &egui::Shape, clip: Rect, found: &mut Vec<(String, Rect, Rect)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, clip, found)),
+                egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect(), clip)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &out.shapes {
+            walk(&clipped.shape, clipped.clip_rect, &mut found);
+        }
+        found
+    }
+
     /// Draws frames until `done` holds, or fails after a few seconds.
     fn frames_until(ctx: &egui::Context, app: &mut App, done: impl Fn(&App) -> bool) {
         for _ in 0..500 {
